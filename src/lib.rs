@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use std::{fs, ops::Deref, os::windows::prelude::FileExt, rc::Rc};
+use std::{fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc};
 
 const SECTOR_SIZE: u64 = 512;
 const SUPER_BLOCK_OFFSET: u64 = 1024;
@@ -34,6 +34,22 @@ macro_rules! From_Bytes {
                 } else {
                     Ok(unsafe { std::mem::transmute(buffer) })
                 }
+            }
+
+            pub fn from_bytes(bytes: Vec<u8>) -> Vec<$struct_name> {
+                bytes
+                    .chunks_exact($struct_name::size())
+                    .map(|chunk| {
+                        let mut sized_buffer = $struct_name::get_sized_buffer();
+                        sized_buffer.as_mut().copy_from_slice(chunk);
+                        unsafe {
+                            std::mem::transmute::<
+                                [u8; std::mem::size_of::<$struct_name>()],
+                                $struct_name,
+                            >(sized_buffer)
+                        }
+                    })
+                    .collect()
             }
 
             fn get_sized_buffer() -> [u8; std::mem::size_of::<$struct_name>()] {
@@ -106,39 +122,48 @@ pub struct Inode {
 From_Bytes!(Inode);
 
 impl Inode {
-    pub fn zone_iter<'b, 'a:'b>(&'b self, part: &'a MinixPartition) -> impl Iterator<Item = u32> + 'b {
-       self.zone_iter_inner(part).take((self.size as u64 / part.super_block.zone_size()) as usize + 1)
+    pub fn zone_iter<'b, 'a: 'b>(
+        &'b self,
+        part: &'a MinixPartition,
+    ) -> impl Iterator<Item = u32> + 'b {
+        self.zone_iter_inner(part)
+            .take((self.size as u64 / part.super_block.zone_size()) as usize + 1)
     }
 
-    fn zone_iter_inner<'b, 'a:'b>(&'b self, part: &'a MinixPartition) -> Box<dyn Iterator<Item = u32> + 'b> {
+    fn zone_iter_inner<'b, 'a: 'b>(
+        &'b self,
+        part: &'a MinixPartition,
+    ) -> Box<dyn Iterator<Item = u32> + 'b> {
         // Compiler will potentially copy from unaligned memory. This solves that issue
         let direct_zones = self.direct_zones;
         let direct_zone_vec = direct_zones.to_vec();
 
         let indirect_zone = self.indirect;
 
-
         let iter_ret = IndirectIterator {
             zone_ptrs: direct_zone_vec,
             idx: 0,
         };
-        
+
         if self.indirect == 0 {
-            return Box::new(iter_ret)
+            return Box::new(iter_ret);
         }
 
         let iter_ret = iter_ret.chain(IndirectIterator::new(part, indirect_zone));
         if self.two_indirect == 0 {
-            return Box::new(iter_ret)
+            return Box::new(iter_ret);
         }
-        
-        Box::new(iter_ret.chain(
-            IndirectIterator::new(part, self.two_indirect)
-                .filter(|zone| *zone != 0)
-                .flat_map(|zone| IndirectIterator::new(part, zone)),
-        ))
+
+        Box::new(
+            iter_ret.chain(
+                IndirectIterator::new(part, self.two_indirect)
+                    .filter(|zone| *zone != 0)
+                    .flat_map(|zone| IndirectIterator::new(part, zone)),
+            ),
+        )
     }
 }
+
 
 struct IndirectIterator {
     zone_ptrs: Vec<u32>,
@@ -156,11 +181,15 @@ impl Iterator for IndirectIterator {
 }
 
 impl IndirectIterator {
-    fn new(partition: &MinixPartition, zone: u32) -> Self {
-        assert_ne!(zone, 0, "IndirectIterator expects a valid zone");
+    fn new(partition: &MinixPartition, zone_id: u32) -> Self {
+        assert_ne!(zone_id, 0, "IndirectIterator expects a valid zone");
+        let block_idx = partition.super_block.zone_to_block(zone_id);
 
-        let zone_data = partition.read_zone(zone).expect("indirect iterator could not read zone");
-        let zone_ptrs: Vec<_> = zone_data
+        // MINIX uses blocks instead of zones for indirect
+        let block_data = partition
+            .read_block(block_idx)
+            .expect("indirect iterator could not read zone");
+        let zone_ptrs: Vec<_> = block_data
             .chunks(4)
             .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect();
@@ -172,7 +201,7 @@ impl IndirectIterator {
 #[repr(packed)]
 #[derive(Debug, Clone, Copy)]
 struct DirectoryEntry {
-    inode: u32,
+    inode_idx: u32,
     file_name: [u8; 60],
 }
 From_Bytes!(DirectoryEntry);
@@ -196,6 +225,10 @@ impl SuperBlock {
     fn zone_size(&self) -> u64 {
         (self.block_size as u64) << self.log_zone_size
     }
+
+    fn zone_to_block(&self, zone_id:u32) -> u32 {
+        zone_id * (1 << self.log_zone_size)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -216,11 +249,12 @@ impl Partition {
         if offset + buf.len() as u64 > self.size_bytes {
             return Err(anyhow!("Failed to read from partition. Detected over read.\nPartition {:?}\noffset: {}, len: {}", self, offset, buf.len()));
         }
-        let bytes = self.file.seek_read(buf, offset + self.start_bytes)?;
+        let bytes = self.file.read_at(buf, offset + self.start_bytes)?;
         Ok(bytes)
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct MinixPartition {
     partition: Partition,
     super_block: SuperBlock,
@@ -239,19 +273,47 @@ impl MinixPartition {
     fn read_zone(&self, zone: u32) -> Result<Vec<u8>> {
         let zone_size = self.super_block.zone_size();
         let mut zone_data = vec![0; zone_size as usize];
-        let bytes_read = self.read_at(&mut zone_data,  zone_size * zone as u64)? as u64;
+        let bytes_read = self.read_at(&mut zone_data, zone_size * zone as u64)? as u64;
         if bytes_read != zone_size {
-            Err(anyhow!("Failed to read zone {} of zone_size: {}. Relieved {} bytes", zone, zone_size, bytes_read))
-        } else  {
+            Err(anyhow!(
+                "Failed to read zone {} of zone_size: {}. Relieved {} bytes",
+                zone,
+                zone_size,
+                bytes_read
+            ))
+        } else {
             Ok(zone_data)
         }
     }
 
-    pub fn root_directory(&self) -> Result<Inode> {
+
+    fn get_inode(&self, idx: u32) -> Result<Inode> {
         // Add 2 to account for first two reserved blocks
         let first_inode_block = (2 + self.super_block.i_blocks + self.super_block.z_blocks) as u64;
         let inode_file_offset = first_inode_block * self.super_block.block_size as u64;
-        Inode::from_partition_offset(self, inode_file_offset)
+        let inode_table_offset = Inode::size() * idx as usize;
+        Inode::from_partition_offset(self, inode_file_offset + inode_table_offset as u64)
+    }
+
+    fn read_block(&self, block_idx: u32) -> Result<Vec<u8>> {
+        let block_size = self.super_block.block_size as u64;
+        let mut block_data = vec![0; block_size as usize];
+        let bytes_read = self.read_at(&mut block_data, block_size * block_idx as u64)? as u64;
+        if bytes_read != block_size {
+            Err(anyhow!(
+                "Failed to read block {} of block_size: {}. Relieved {} bytes",
+                block_idx,
+                block_size,
+                bytes_read
+            ))
+        } else {
+            Ok(block_data)
+        }
+    }
+
+    pub fn root_directory(&self) -> Result<Directory> {
+        let inode = self.get_inode(0)?;
+        Directory::new(self, inode)
     }
 }
 
@@ -287,7 +349,7 @@ impl PartitionTree {
         // TODO: MAKE CLEANER
         possible_partition
             .file
-            .seek_read(&mut buf, 510 + possible_partition.start_bytes)
+            .read_at(&mut buf, 510 + possible_partition.start_bytes)
             .ok();
 
         if !(buf[0] == 0x55 && buf[1] == 0xAA) {
@@ -330,6 +392,140 @@ impl TryFrom<&PartitionTree> for Partition {
 
 From_Bytes!(SuperBlock);
 
+#[derive(Debug, Clone)]
+pub enum FileSystemRef<'a> {
+    DirectoryRef(DirectoryRef<'a>),
+    FileRef(FileRef<'a>),
+}
+
+impl<'a> FileSystemRef<'a> {
+    fn from_directory_entry(partition: &'a MinixPartition, dir_entry: DirectoryEntry) -> Result<Self> {
+        const REGULAR_FILE_MASK: u16 = 0o0100000;
+        const DIRECTORY_MASK: u16 = 0o0040000;
+        const FILE_TYPE_MASK: u16 = 0o0170000;
+
+        let name_vec: Vec<_> = dir_entry
+            .file_name
+            .into_iter()
+            .take_while(|ch| *ch != 0)
+            .collect();
+        let name = String::from_utf8(name_vec)?;
+        let inode = partition.get_inode(dir_entry.inode_idx)?;
+
+        let inode_mode = inode.mode;
+        match FILE_TYPE_MASK & inode_mode {
+            REGULAR_FILE_MASK => Ok(FileSystemRef::FileRef(FileRef { inode, name, partition })),
+            DIRECTORY_MASK => Ok(FileSystemRef::DirectoryRef(DirectoryRef { inode, name, partition })),
+            _ => Err(anyhow!(
+                "Could not create a file system ref. Got invalid mode {inode_mode}"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DirectoryRef<'a> {
+    partition: &'a MinixPartition,
+    inode: Inode,
+    pub name: String,
+}
+
+impl<'a> DirectoryRef<'a> {
+    pub fn get(&self) -> Result<Directory> {
+        Directory::new(self.partition, self.inode)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FileRef<'a> {
+    partition: &'a MinixPartition,
+    inode: Inode,
+    pub name: String,
+}
+
+impl<'a> FileRef<'a> {
+    pub fn get(&self) -> Result<Vec<u8>> {
+        self
+            .inode
+            .zone_iter(self.partition)
+            .fold(Ok(vec![]), |acc, zone_id| {
+                let mut acc_vec = acc?;
+                if zone_id == 0 {
+                    let mut zeroed = vec![0; self.partition.super_block.zone_size() as usize];
+                    acc_vec.append(&mut zeroed);
+                } else {
+                    let mut zone_data = self.partition.read_zone(zone_id)?;
+                    acc_vec.append(&mut zone_data);
+                }
+                Ok(acc_vec)
+            })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Directory<'a> {
+    partition: &'a MinixPartition,
+    inode: Inode,
+    refs: Vec<FileSystemRef<'a>>,
+}
+
+impl<'a> Directory<'a> {
+    fn new(partition: &'a MinixPartition, inode: Inode) -> Result<Self> {
+        let dir_entry_bytes: Vec<u8> = inode
+            .zone_iter(partition)
+            // TODO: This should maybe be an assert since the .take() should take care of this
+            // Filter out zone_id 0 since it is valid for files but not for directories
+            .filter(|zone_id| *zone_id != 0)
+            .fold(Ok(vec![]), |acc:Result<Vec<u8>>, zone_id:u32| {
+                let mut acc_vec = acc?;
+                let mut zone_data = partition.read_zone(zone_id)?;
+                acc_vec.append(&mut zone_data);
+                Ok(acc_vec)
+            })?;
+        let dir_entries = DirectoryEntry::from_bytes(dir_entry_bytes);
+        let refs = dir_entries
+            .into_iter()
+            // Need to filter out 0 since because from_bytes will just convert entire zones
+            .filter(|dir_entry| dir_entry.inode_idx != 0)
+            .map(|dir_entry| FileSystemRef::from_directory_entry(partition, dir_entry))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            partition,
+            inode,
+            refs,
+        })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &FileSystemRef> + '_ {
+        self.refs.iter()
+    }
+
+    pub fn dir_iter(&self) -> impl Iterator<Item = &DirectoryRef> + '_ {
+        self
+            .refs
+            .iter()
+            .filter_map(|file_system_ref| {
+                match file_system_ref {
+                    FileSystemRef::DirectoryRef(dir) => Some(dir),
+                    FileSystemRef::FileRef(_) => None,
+                }
+            })
+    }
+
+    pub fn file_iter(&self) -> impl Iterator<Item = &FileRef> + '_ {
+        self
+            .refs
+            .iter()
+            .filter_map(|file_system_ref| {
+                match file_system_ref {
+                    FileSystemRef::DirectoryRef(_) => None,
+                    FileSystemRef::FileRef(file) => Some(file),
+                }
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -346,32 +542,21 @@ mod tests {
 
     #[test]
     fn test_get_root_directory() -> Result<()> {
-        let partition: Partition = (&PartitionTree::new("./Images/BigIndirectDirs")?).try_into().unwrap();
+        let partition: Partition = (&PartitionTree::new("./Images/BigIndirectDirs")?)
+            .try_into()
+            .unwrap();
         let minix_partition = MinixPartition::new(partition)?;
-        let root_inode = minix_partition.root_directory()?;
-        println!("{:?}", root_inode);
-        assert!(0o0040000 & root_inode.mode == 0o0040000);
-
-        for zone in root_inode.zone_iter(&minix_partition) {
-            if zone == 0 {
-                continue;
-            }
-            println!("Getting zone {zone}");
-            let mut i = 0;
-            loop {
-                let directory_entry = DirectoryEntry::from_partition_offset(
-                    &minix_partition,
-                    minix_partition.super_block.zone_size() * zone as u64
-                        + (i * std::mem::size_of::<DirectoryEntry>()) as u64,
-                )?;
-                println!("{:?}", directory_entry);
-                if directory_entry.inode == 0 {
-                    break;
+        let root_dir = minix_partition.root_directory()?;
+        let contents:Vec<_> = root_dir
+            .iter()
+            .map(|file_system_ref| {
+                match file_system_ref {
+                    FileSystemRef::FileRef(file) => &file.name,
+                    FileSystemRef::DirectoryRef(dir) => &dir.name
                 }
-                i += 1;
-            }
-        }
-
+            })
+            .collect();
+        println!("{:#?}", contents);
         Ok(())
     }
 
