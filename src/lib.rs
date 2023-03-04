@@ -105,8 +105,7 @@ const DIRECT_ZONE_COUNT: usize = 7;
 #[repr(C)]
 #[repr(packed)]
 #[derive(Debug, Clone, Copy)]
-// TODO: Remove public
-pub struct Inode {
+struct Inode {
     mode: u16,  /* mode */
     links: u16, /* number or links */
     uid: u16,
@@ -127,9 +126,15 @@ impl Inode {
         &'b self,
         part: &'a MinixPartition,
     ) -> impl Iterator<Item = u32> + 'b {
+        let zone_size = part.super_block.zone_size();
+        let file_size = self.size as u64;
+        let take_amount = if file_size % zone_size == 0 {
+            (file_size / zone_size) as usize
+        } else {
+            (file_size / zone_size) as usize + 1
+        };
         self.zone_iter_inner(part)
-            // TODO: Fixme math does not check out
-            .take((self.size as u64 / part.super_block.zone_size()) as usize + 1)
+            .take(take_amount)
     }
 
     fn zone_iter_inner<'b, 'a: 'b>(
@@ -327,7 +332,7 @@ impl<'a> Deref for MinixPartition<'a> {
     type Target = Partition;
 
     fn deref(&self) -> &Self::Target {
-        &self.partition
+        self.partition
     }
 }
 
@@ -510,6 +515,7 @@ impl<'a> Directory<'a> {
         let dir_entry_bytes: Vec<u8> = dir_ref
             .inode
             .zone_iter(dir_ref.partition)
+            // TODO: This should maybe be done with an assert
             // Filter out zone_id 0 since it is valid for files but not for directories
             .filter(|zone_id| *zone_id != 0)
             .fold(Ok(vec![]), |acc: Result<Vec<u8>>, zone_id: u32| {
