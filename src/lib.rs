@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use enum_dispatch::enum_dispatch;
 use std::{fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc};
 
 const SECTOR_SIZE: u64 = 512;
@@ -255,15 +256,15 @@ impl Partition {
 }
 
 #[derive(Debug, Clone)]
-pub struct MinixPartition {
-    partition: Partition,
+pub struct MinixPartition<'a> {
+    partition: &'a Partition,
     super_block: SuperBlock,
 }
 
-impl MinixPartition {
-    pub fn new(partition: Partition) -> Result<Self> {
+impl<'a> MinixPartition<'a> {
+    pub fn new(partition: &'a Partition) -> Result<Self> {
         // TODO: Somehow check the partition table entry for the partition type??
-        let super_block = SuperBlock::new(&partition)?;
+        let super_block = SuperBlock::new(partition)?;
         Ok(MinixPartition {
             partition,
             super_block,
@@ -312,13 +313,17 @@ impl MinixPartition {
         }
     }
 
-    pub fn root_directory(&self) -> Result<Directory> {
+    pub fn root_ref(&self) -> Result<DirectoryRef> {
         let inode = self.get_inode(1)?;
-        Directory::new(self, inode)
+        Ok(DirectoryRef {
+            inode,
+            name: "/".to_string(),
+            partition: self,
+        })
     }
 }
 
-impl Deref for MinixPartition {
+impl<'a> Deref for MinixPartition<'a> {
     type Target = Partition;
 
     fn deref(&self) -> &Self::Target {
@@ -393,6 +398,12 @@ impl TryFrom<&PartitionTree> for Partition {
 
 From_Bytes!(SuperBlock);
 
+#[enum_dispatch]
+trait FileSystemRefFunctionality {
+    fn name(&self) -> &String;
+}
+
+#[enum_dispatch(FileSystemRefFunctionality)]
 #[derive(Debug, Clone)]
 pub enum FileSystemRef<'a> {
     DirectoryRef(DirectoryRef<'a>),
@@ -437,29 +448,35 @@ impl<'a> FileSystemRef<'a> {
 
 #[derive(Debug, Clone)]
 pub struct DirectoryRef<'a> {
-    partition: &'a MinixPartition,
+    partition: &'a MinixPartition<'a>,
     inode: Inode,
     pub name: String,
 }
 
 impl<'a> DirectoryRef<'a> {
     pub fn get(&self) -> Result<Directory> {
-        Directory::new(self.partition, self.inode)
+        Directory::new(self)
+    }
+}
+
+impl<'a> FileSystemRefFunctionality for DirectoryRef<'a> {
+    fn name(&self) -> &String {
+        &self.name
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct FileRef<'a> {
-    partition: &'a MinixPartition,
+    partition: &'a MinixPartition<'a>,
     inode: Inode,
     pub name: String,
 }
 
 impl<'a> FileRef<'a> {
     pub fn get(&self) -> Result<Vec<u8>> {
-        self.inode
+        let mut data = self.inode
             .zone_iter(self.partition)
-            .fold(Ok(vec![]), |acc, zone_id| {
+            .fold(Ok(vec![]), |acc:Result<Vec<u8>>, zone_id| {
                 let mut acc_vec = acc?;
                 if zone_id == 0 {
                     let mut zeroed = vec![0; self.partition.super_block.zone_size() as usize];
@@ -469,26 +486,35 @@ impl<'a> FileRef<'a> {
                     acc_vec.append(&mut zone_data);
                 }
                 Ok(acc_vec)
-            })
+            })?;
+        // the size should be eual or smaller
+        data.resize(self.inode.size as usize, 0);
+        Ok(data)
+    }
+}
+
+impl<'a> FileSystemRefFunctionality for FileRef<'a> {
+    fn name(&self) -> &String {
+        &self.name
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Directory<'a> {
-    partition: &'a MinixPartition,
-    inode: Inode,
+    dir_ref: &'a DirectoryRef<'a>,
     refs: Vec<FileSystemRef<'a>>,
 }
 
 impl<'a> Directory<'a> {
-    fn new(partition: &'a MinixPartition, inode: Inode) -> Result<Self> {
-        let dir_entry_bytes: Vec<u8> = inode
-            .zone_iter(partition)
+    fn new(dir_ref: &'a DirectoryRef<'a>) -> Result<Self> {
+        let dir_entry_bytes: Vec<u8> = dir_ref
+            .inode
+            .zone_iter(dir_ref.partition)
             // Filter out zone_id 0 since it is valid for files but not for directories
             .filter(|zone_id| *zone_id != 0)
             .fold(Ok(vec![]), |acc: Result<Vec<u8>>, zone_id: u32| {
                 let mut acc_vec = acc?;
-                let mut zone_data = partition.read_zone(zone_id)?;
+                let mut zone_data = dir_ref.partition.read_zone(zone_id)?;
                 acc_vec.append(&mut zone_data);
                 Ok(acc_vec)
             })?;
@@ -497,14 +523,10 @@ impl<'a> Directory<'a> {
             .into_iter()
             // Need to filter out 0 since because from_bytes will just convert entire zones
             .filter(|dir_entry| dir_entry.inode_idx != 0)
-            .map(|dir_entry| FileSystemRef::from_directory_entry(partition, dir_entry))
+            .map(|dir_entry| FileSystemRef::from_directory_entry(dir_ref.partition, dir_entry))
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Self {
-            partition,
-            inode,
-            refs,
-        })
+        Ok(Self { dir_ref, refs })
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &FileSystemRef> + '_ {
@@ -538,11 +560,19 @@ impl<'a> Directory<'a> {
     }
 }
 
+impl<'a> Deref for Directory<'a> {
+    type Target = DirectoryRef<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        self.dir_ref
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
+    use std::ffi::CString;
+
 
     // #[test]
     // fn test_get_super_block() -> Result<()> {
@@ -557,20 +587,18 @@ mod tests {
         let partition: Partition = (&PartitionTree::new("./Images/BigIndirectDirs")?)
             .try_into()
             .unwrap();
-        let minix_partition = MinixPartition::new(partition)?;
-        let root_dir = minix_partition.root_directory()?;
+        let minix_partition = MinixPartition::new(&partition)?;
+        let root_ref = minix_partition.root_ref()?;
+        let root_dir = root_ref.get()?;
         let level_1 = root_dir.find_dir("Level1").unwrap().get()?;
         let level_2 = level_1.find_dir("Level2").unwrap().get()?;
 
-
         let contents: Vec<_> = level_2
             .iter()
-            .map(|file_system_ref| match file_system_ref {
-                FileSystemRef::FileRef(file) => file.name.clone(),
-                FileSystemRef::DirectoryRef(dir) => dir.name.clone(),
-            })
+            .map(|file_system_ref| file_system_ref.name())
+            .cloned()
             .collect();
-        
+
         let mut expected = vec![".".to_string(), "..".to_string(), "BigDir".to_string()];
         for i in 0..=950 {
             if i % 10 > 7 {
@@ -596,6 +624,86 @@ mod tests {
         for sub_partition in *subs {
             assert!(sub_partition.is_some());
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_sub_partition_and_hard_disk_run() -> Result<()> {
+        let partition_tree = PartitionTree::new("./Images/HardDisk").unwrap();
+        let PartitionTree::SubPartitions(primary_table) = partition_tree else {
+            panic!("Did not get primary partition table")
+        };
+
+        let Some(PartitionTree::SubPartitions(sub_table)) = &primary_table[0] else {
+            panic!("Did not get primary partition")
+        };
+
+        let Some(PartitionTree::Partition(sub_partition)) = &sub_table[2] else {
+            panic!("Did not get sub partition back")
+        };
+
+        let minix_fs = MinixPartition::new(sub_partition)?;
+
+        let root_ref = minix_fs.root_ref()?;
+        let root_dir = root_ref.get()?;
+
+        let root_contents: Vec<_> = root_dir
+            .iter()
+            .map(|fs_ref| fs_ref.name())
+            .collect();
+        // TODO find out why . and .. are files
+        let root_expected = vec![
+            ".",
+            "..",
+            "adm",
+            "ast",
+            "bin",
+            "etc",
+            "gnu",
+            "include",
+            "lib",
+            "log",
+            "man",
+            "mdec",
+            "preserve",
+            "run",
+            "sbin",
+            "spool",
+            "tmp",
+            "src",
+            "home",
+        ];
+
+        assert_eq!(root_expected, root_contents);
+
+        let home = root_dir.find_dir("home").unwrap().get()?;
+        let pnico = home.find_dir("pnico").unwrap().get()?;
+
+        let pnico_contents: Vec<_> = pnico
+            .iter()
+            .map(|fs_ref| fs_ref.name())
+            .collect();
+
+        let pnico_expected = vec![
+            ".",
+            "..",
+            ".ashrc",
+            ".ellepro.b1",
+            ".ellepro.e",
+            ".exrc",
+            ".profile",
+            ".vimrc",
+            "Message",
+        ];
+
+        assert_eq!(pnico_expected, pnico_contents);
+
+        let message_bytes = pnico.find_file("Message").unwrap().get()?;
+        let message_c_string = CString::new(message_bytes)?;
+        let message_string = message_c_string.to_str()?;
+
+        assert_eq!(message_string, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
 
         Ok(())
     }
