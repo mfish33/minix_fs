@@ -127,6 +127,7 @@ impl Inode {
         part: &'a MinixPartition,
     ) -> impl Iterator<Item = u32> + 'b {
         self.zone_iter_inner(part)
+            // TODO: Fixme math does not check out
             .take((self.size as u64 / part.super_block.zone_size()) as usize + 1)
     }
 
@@ -164,7 +165,6 @@ impl Inode {
     }
 }
 
-
 struct IndirectIterator {
     zone_ptrs: Vec<u32>,
     idx: usize,
@@ -174,7 +174,7 @@ impl Iterator for IndirectIterator {
     type Item = u32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let ret = self.zone_ptrs.get(self.idx).map(|x| *x);
+        let ret = self.zone_ptrs.get(self.idx).copied();
         self.idx += 1;
         ret
     }
@@ -226,7 +226,7 @@ impl SuperBlock {
         (self.block_size as u64) << self.log_zone_size
     }
 
-    fn zone_to_block(&self, zone_id:u32) -> u32 {
+    fn zone_to_block(&self, zone_id: u32) -> u32 {
         zone_id * (1 << self.log_zone_size)
     }
 }
@@ -286,12 +286,13 @@ impl MinixPartition {
         }
     }
 
-
+    // NOTE: inodes are 1 indexed
     fn get_inode(&self, idx: u32) -> Result<Inode> {
+        assert_ne!(idx, 0, "0 is not a valid inode");
         // Add 2 to account for first two reserved blocks
         let first_inode_block = (2 + self.super_block.i_blocks + self.super_block.z_blocks) as u64;
         let inode_file_offset = first_inode_block * self.super_block.block_size as u64;
-        let inode_table_offset = Inode::size() * idx as usize;
+        let inode_table_offset = Inode::size() * (idx - 1) as usize;
         Inode::from_partition_offset(self, inode_file_offset + inode_table_offset as u64)
     }
 
@@ -312,7 +313,7 @@ impl MinixPartition {
     }
 
     pub fn root_directory(&self) -> Result<Directory> {
-        let inode = self.get_inode(0)?;
+        let inode = self.get_inode(1)?;
         Directory::new(self, inode)
     }
 }
@@ -399,7 +400,10 @@ pub enum FileSystemRef<'a> {
 }
 
 impl<'a> FileSystemRef<'a> {
-    fn from_directory_entry(partition: &'a MinixPartition, dir_entry: DirectoryEntry) -> Result<Self> {
+    fn from_directory_entry(
+        partition: &'a MinixPartition,
+        dir_entry: DirectoryEntry,
+    ) -> Result<Self> {
         const REGULAR_FILE_MASK: u16 = 0o0100000;
         const DIRECTORY_MASK: u16 = 0o0040000;
         const FILE_TYPE_MASK: u16 = 0o0170000;
@@ -414,8 +418,16 @@ impl<'a> FileSystemRef<'a> {
 
         let inode_mode = inode.mode;
         match FILE_TYPE_MASK & inode_mode {
-            REGULAR_FILE_MASK => Ok(FileSystemRef::FileRef(FileRef { inode, name, partition })),
-            DIRECTORY_MASK => Ok(FileSystemRef::DirectoryRef(DirectoryRef { inode, name, partition })),
+            REGULAR_FILE_MASK => Ok(FileSystemRef::FileRef(FileRef {
+                inode,
+                name,
+                partition,
+            })),
+            DIRECTORY_MASK => Ok(FileSystemRef::DirectoryRef(DirectoryRef {
+                inode,
+                name,
+                partition,
+            })),
             _ => Err(anyhow!(
                 "Could not create a file system ref. Got invalid mode {inode_mode}"
             )),
@@ -445,8 +457,7 @@ pub struct FileRef<'a> {
 
 impl<'a> FileRef<'a> {
     pub fn get(&self) -> Result<Vec<u8>> {
-        self
-            .inode
+        self.inode
             .zone_iter(self.partition)
             .fold(Ok(vec![]), |acc, zone_id| {
                 let mut acc_vec = acc?;
@@ -473,10 +484,9 @@ impl<'a> Directory<'a> {
     fn new(partition: &'a MinixPartition, inode: Inode) -> Result<Self> {
         let dir_entry_bytes: Vec<u8> = inode
             .zone_iter(partition)
-            // TODO: This should maybe be an assert since the .take() should take care of this
             // Filter out zone_id 0 since it is valid for files but not for directories
             .filter(|zone_id| *zone_id != 0)
-            .fold(Ok(vec![]), |acc:Result<Vec<u8>>, zone_id:u32| {
+            .fold(Ok(vec![]), |acc: Result<Vec<u8>>, zone_id: u32| {
                 let mut acc_vec = acc?;
                 let mut zone_data = partition.read_zone(zone_id)?;
                 acc_vec.append(&mut zone_data);
@@ -502,27 +512,29 @@ impl<'a> Directory<'a> {
     }
 
     pub fn dir_iter(&self) -> impl Iterator<Item = &DirectoryRef> + '_ {
-        self
-            .refs
+        self.refs
             .iter()
-            .filter_map(|file_system_ref| {
-                match file_system_ref {
-                    FileSystemRef::DirectoryRef(dir) => Some(dir),
-                    FileSystemRef::FileRef(_) => None,
-                }
+            .filter_map(|file_system_ref| match file_system_ref {
+                FileSystemRef::DirectoryRef(dir) => Some(dir),
+                FileSystemRef::FileRef(_) => None,
             })
     }
 
     pub fn file_iter(&self) -> impl Iterator<Item = &FileRef> + '_ {
-        self
-            .refs
+        self.refs
             .iter()
-            .filter_map(|file_system_ref| {
-                match file_system_ref {
-                    FileSystemRef::DirectoryRef(_) => None,
-                    FileSystemRef::FileRef(file) => Some(file),
-                }
+            .filter_map(|file_system_ref| match file_system_ref {
+                FileSystemRef::DirectoryRef(_) => None,
+                FileSystemRef::FileRef(file) => Some(file),
             })
+    }
+
+    pub fn find_dir(&self, name: &str) -> Option<&DirectoryRef> {
+        self.dir_iter().find(|dir_ref| dir_ref.name == name)
+    }
+
+    pub fn find_file(&self, name: &str) -> Option<&FileRef> {
+        self.file_iter().find(|file_ref| file_ref.name == name)
     }
 }
 
@@ -541,22 +553,36 @@ mod tests {
     // }
 
     #[test]
-    fn test_get_root_directory() -> Result<()> {
+    fn test_level_one_indirection() -> Result<()> {
         let partition: Partition = (&PartitionTree::new("./Images/BigIndirectDirs")?)
             .try_into()
             .unwrap();
         let minix_partition = MinixPartition::new(partition)?;
         let root_dir = minix_partition.root_directory()?;
-        let contents:Vec<_> = root_dir
+        let level_1 = root_dir.find_dir("Level1").unwrap().get()?;
+        let level_2 = level_1.find_dir("Level2").unwrap().get()?;
+
+
+        let contents: Vec<_> = level_2
             .iter()
-            .map(|file_system_ref| {
-                match file_system_ref {
-                    FileSystemRef::FileRef(file) => &file.name,
-                    FileSystemRef::DirectoryRef(dir) => &dir.name
-                }
+            .map(|file_system_ref| match file_system_ref {
+                FileSystemRef::FileRef(file) => file.name.clone(),
+                FileSystemRef::DirectoryRef(dir) => dir.name.clone(),
             })
             .collect();
-        println!("{:#?}", contents);
+        
+        let mut expected = vec![".".to_string(), "..".to_string(), "BigDir".to_string()];
+        for i in 0..=950 {
+            if i % 10 > 7 {
+                continue;
+            }
+            expected.push(format!("file_{:0>3}", i))
+        }
+        expected.push("LastFile".to_string());
+
+        assert_eq!(contents.len(), expected.len());
+        assert_eq!(contents, expected);
+
         Ok(())
     }
 
