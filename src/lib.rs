@@ -565,7 +565,14 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
         self.file_iter().find(|file_ref| file_ref.name == name)
     }
 
-    pub fn get_path(self: &'a Directory<'a, 'b>, path: &str) -> Result<FileSystemRef<'b>> {
+    pub fn get_path(self: &'a Directory<'a, 'b>, mut path: &str) -> Result<FileSystemRef<'b>> {
+        // treat paths which lead with '/' the same as those which don't,
+        // "/usr/bin/gcc" == "usr/bin/gcc" will return the same file, if it exists
+        if let Some(leading) = path.chars().next() {
+            if leading == '\\' || leading == '/' {
+                path = &path[1..];
+            }
+        }
         match path.split_once(&['\\', '/']) {
             Some((stem, path)) => {
                 if let Some(FileSystemRef::DirectoryRef(dref)) = self.iter().find(|file_system_ref| file_system_ref.name() == stem) {
@@ -736,7 +743,48 @@ mod tests {
         Ok(())
     }
 
+    #[test]
     fn test_file_get() -> Result<()> {
+        let partition_tree = PartitionTree::new("./Images/HardDisk").unwrap();
+        let PartitionTree::SubPartitions(primary_table) = partition_tree else {
+            panic!("Did not get primary partition table")
+        };
+
+        let Some(PartitionTree::SubPartitions(sub_table)) = &primary_table[0] else {
+            panic!("Did not get primary partition")
+        };
+
+        let Some(PartitionTree::Partition(sub_partition)) = &sub_table[2] else {
+            panic!("Did not get sub partition back")
+        };
+
+        let minix_fs = MinixPartition::new(sub_partition)?;
+
+        let root_ref = minix_fs.root_ref()?;
+        let root_dir = root_ref.get()?;
+
+        let bin_dir = root_dir.get_path("bin").expect("bin not found");
+        let pnico_dir = root_dir.get_path("home/pnico").expect("pnico not found");
+        let message_file = root_dir.get_path("home/pnico/Message").expect("message not found");
+        let message_file_alt = root_dir.get_path("/home/pnico/Message").expect("message alt not found");
+        let FileSystemRef::DirectoryRef(bin) = bin_dir else {
+            panic!("bin not dir");
+        };
+        let FileSystemRef::DirectoryRef(pnico) = pnico_dir else {
+            panic!("pnico not dir");
+        };
+        let FileSystemRef::FileRef(msg) = message_file else {
+            panic!("msg not file");
+        };
+        let FileSystemRef::FileRef(msg_alt) = message_file_alt else {
+            panic!("msg alt not file");
+        };
+
+        assert!(bin.name == "bin");
+        assert!(pnico.name == "pnico");
+        assert_eq!(CString::new(msg.get().expect("could not read msg"))?.to_str()?, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
+        assert_eq!(CString::new(msg_alt.get().expect("could not read msg"))?.to_str()?, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
+
         Ok(())
     }
 }
