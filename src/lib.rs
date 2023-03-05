@@ -415,9 +415,9 @@ pub enum FileSystemRef<'a> {
     FileRef(FileRef<'a>),
 }
 
-impl<'a> FileSystemRef<'a> {
+impl<'a, 'b: 'a> FileSystemRef<'b> {
     fn from_directory_entry(
-        partition: &'a MinixPartition,
+        partition: &'b MinixPartition,
         dir_entry: DirectoryEntry,
     ) -> Result<Self> {
         const REGULAR_FILE_MASK: u16 = 0o0100000;
@@ -505,13 +505,13 @@ impl<'a> FileSystemRefFunctionality for FileRef<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Directory<'a> {
-    dir_ref: &'a DirectoryRef<'a>,
-    refs: Vec<FileSystemRef<'a>>,
+pub struct Directory<'a, 'b: 'a> {
+    dir_ref: &'a DirectoryRef<'b>,
+    refs: Vec<FileSystemRef<'b>>,
 }
 
-impl<'a> Directory<'a> {
-    fn new(dir_ref: &'a DirectoryRef<'a>) -> Result<Self> {
+impl<'a, 'b: 'a> Directory<'a, 'b> {
+    fn new(dir_ref: &'a DirectoryRef<'b>) -> Result<Directory<'a, 'b>> {
         let dir_entry_bytes: Vec<u8> = dir_ref
             .inode
             .zone_iter(dir_ref.partition)
@@ -535,7 +535,7 @@ impl<'a> Directory<'a> {
         Ok(Self { dir_ref, refs })
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &FileSystemRef> + '_ {
+    pub fn iter(&'a self) -> impl Iterator<Item = &'a FileSystemRef<'b>> + '_ {
         self.refs.iter()
     }
 
@@ -564,10 +564,30 @@ impl<'a> Directory<'a> {
     pub fn find_file(&self, name: &str) -> Option<&FileRef> {
         self.file_iter().find(|file_ref| file_ref.name == name)
     }
+
+    pub fn get_path(self: &'a Directory<'a, 'b>, path: &str) -> Result<FileSystemRef<'b>> {
+        match path.split_once(&['\\', '/']) {
+            Some((stem, path)) => {
+                if let Some(FileSystemRef::DirectoryRef(dref)) = self.iter().find(|file_system_ref| file_system_ref.name() == stem) {
+                    let sub_dir: Directory<'a, 'b> = Directory::new(dref)?;
+                    sub_dir.get_path(path)
+                } else {
+                    Err(anyhow::Error::msg("invalid path"))
+                }
+            }
+            None => {
+                if let Some(fsref) = self.iter().find(|file_system_ref| file_system_ref.name() == path) {
+                    Ok(fsref.clone())
+                } else {
+                    Err(anyhow::Error::msg("invalid path"))
+                }
+            }
+        }
+    }
 }
 
-impl<'a> Deref for Directory<'a> {
-    type Target = DirectoryRef<'a>;
+impl<'a, 'b: 'a> Deref for Directory<'a, 'b> {
+    type Target = DirectoryRef<'b>;
 
     fn deref(&self) -> &Self::Target {
         self.dir_ref
@@ -576,6 +596,8 @@ impl<'a> Deref for Directory<'a> {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Ok;
+
     use super::*;
     use std::ffi::CString;
 
@@ -711,6 +733,10 @@ mod tests {
 
         assert_eq!(message_string, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
 
+        Ok(())
+    }
+
+    fn test_file_get() -> Result<()> {
         Ok(())
     }
 }
