@@ -567,7 +567,7 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
 
     pub fn get_path(self: &'a Directory<'a, 'b>, mut path: &str) -> Result<FileSystemRef<'b>> {
         // treat paths which lead with '/' the same as those which don't,
-        // "/usr/bin/gcc" == "usr/bin/gcc" will return the same file, if it exists
+        // relative to some directory, "/usr/bin/gcc" == "usr/bin/gcc" should return the same file, if it exists
         if let Some(leading) = path.chars().next() {
             if leading == '\\' || leading == '/' {
                 path = &path[1..];
