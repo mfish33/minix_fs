@@ -69,6 +69,7 @@ struct PartitionTableEntry {
     l_first: u32,
     size: u32,
 }
+
 From_Bytes!(PartitionTableEntry);
 
 #[repr(C)]
@@ -238,7 +239,7 @@ pub struct Partition {
     file: Rc<fs::File>,
     start_bytes: u64,
     size_bytes: u64,
-    partition_table: u64, //this value is negative so it can be used with 'from_partition_offset
+    partition_table_abs_offset: u64,
 }
 
 impl Partition {
@@ -251,12 +252,12 @@ impl Partition {
     }
 
     fn get_partition_table(&self) -> Result<PartitionTableEntry> {
-        let mut buf = [0u8; std::mem::size_of::<PartitionTableEntry>()];
-        let bytes = self.file.read_at(&mut buf, self.partition_table)?;
+        let mut buf = PartitionTableEntry::get_sized_buffer();
+        let bytes = self.file.read_at(&mut buf, self.partition_table_abs_offset)?;
         if bytes != std::mem::size_of::<PartitionTableEntry>() {
             return Err(anyhow!("Failed to read partition table entry"));
         }
-        Ok(unsafe {std::mem::transmute::<[u8; std::mem::size_of::<PartitionTableEntry>()], PartitionTableEntry>(buf)})
+        Ok(unsafe {std::mem::transmute(buf)})
     }
 }
 
@@ -271,7 +272,7 @@ impl<'a> MinixPartition<'a> {
         // TODO: Somehow check the partition table entry for the partition type??
         let partition_table = partition.get_partition_table()?;
         if partition_table.part_type != MINIX_PARTITION_TYPE {
-            return Err(anyhow!("This doesn't look like a MINIX filesystem."))
+            return Err(anyhow!("This doesn't look like a MINIX filesystem. {}", partition_table.part_type))
         }
         let super_block = SuperBlock::new(partition)?;
         Ok(MinixPartition {
@@ -348,7 +349,7 @@ impl PartitionTree {
             size_bytes: file.metadata()?.len(),
             file: Rc::new(file),
             start_bytes: 0,
-            partition_table: 0,
+            partition_table_abs_offset: 0,
         };
         Self::get_partitions(possible_partition)
     }
@@ -375,10 +376,10 @@ impl PartitionTree {
 
         let mut partition_table = Box::new([None, None, None, None]);
         for i in 0..partition_table.len() {
-            let partition_table_offset = PARTITION_TABLE_OFFSET + (PartitionTableEntry::size() * i) as u64;
+            let relative_partition_table_offset = PARTITION_TABLE_OFFSET + (PartitionTableEntry::size() * i) as u64;
             let partition_table_entry = PartitionTableEntry::from_partition_offset(
                 &possible_partition,
-                partition_table_offset
+                relative_partition_table_offset
             )?;
 
             // it is zero if it is an empty partition
@@ -388,7 +389,7 @@ impl PartitionTree {
                     file: possible_partition.file.clone(),
                     start_bytes: partition_table_entry.l_first as u64 * SECTOR_SIZE,
                     size_bytes: partition_table_entry.size as u64 * SECTOR_SIZE,
-                    partition_table: partition_table_offset
+                    partition_table_abs_offset: possible_partition.start_bytes + relative_partition_table_offset
                 })?);
             }
         }
@@ -572,7 +573,7 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
         self.file_iter().find(|file_ref| file_ref.name == name)
     }
 
-    pub fn get_at_path(self: &'a Directory<'a, 'b>, mut path: &str) -> Result<FileSystemRef<'b>> {
+    pub fn get_at_path(&'a self, mut path: &str) -> Result<FileSystemRef<'b>> {
         // treat paths which lead with '/' the same as those which don't,
         // relative to some directory, "/usr/bin/gcc" == "usr/bin/gcc" should return the same file, if it exists
         if let Some(leading) = path.chars().next() {
@@ -583,8 +584,7 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
         match path.split_once(&['\\', '/']) {
             Some((stem, path)) => {
                 if let Some(FileSystemRef::DirectoryRef(dref)) = self.iter().find(|file_system_ref| file_system_ref.name() == stem) {
-                    let sub_dir: Directory<'a, 'b> = Directory::new(dref)?;
-                    sub_dir.get_at_path(path)
+                    Directory::new(dref)?.get_at_path(path)
                 } else {
                     Err(anyhow::Error::msg("invalid path"))
                 }
@@ -799,14 +799,4 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_invalid_minix_fs() -> Result<()> {
-
-        /// TODO the '0, 0' partition is not valid but the '0, 2' one is
-        let partition_tree = PartitionTree::new("./Images/HardDisk").unwrap();
-        let PartitionTree::SubPartitions(subs) = partition_tree else {
-            panic!("Did not get sub partitions back")
-        };
-        Ok(())
-    }
 }
