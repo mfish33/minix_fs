@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use enum_dispatch::enum_dispatch;
-use std::{fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc};
+use std::{fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc, any::Any};
 
 const SECTOR_SIZE: u64 = 512;
 const SUPER_BLOCK_OFFSET: u64 = 1024;
@@ -238,6 +238,7 @@ pub struct Partition {
     file: Rc<fs::File>,
     start_bytes: u64,
     size_bytes: u64,
+    partition_table: u64, //this value is negative so it can be used with 'from_partition_offset
 }
 
 impl Partition {
@@ -247,6 +248,15 @@ impl Partition {
         }
         let bytes = self.file.read_at(buf, offset + self.start_bytes)?;
         Ok(bytes)
+    }
+
+    fn get_partition_table(&self) -> Result<PartitionTableEntry> {
+        let mut buf = [0u8; std::mem::size_of::<PartitionTableEntry>()];
+        let bytes = self.file.read_at(&mut buf, self.partition_table)?;
+        if bytes != std::mem::size_of::<PartitionTableEntry>() {
+            return Err(anyhow!("Failed to read partition table entry"));
+        }
+        Ok(unsafe {std::mem::transmute::<[u8; std::mem::size_of::<PartitionTableEntry>()], PartitionTableEntry>(buf)})
     }
 }
 
@@ -259,6 +269,10 @@ pub struct MinixPartition<'a> {
 impl<'a> MinixPartition<'a> {
     pub fn new(partition: &'a Partition) -> Result<Self> {
         // TODO: Somehow check the partition table entry for the partition type??
+        let partition_table = partition.get_partition_table()?;
+        if partition_table.part_type != MINIX_PARTITION_TYPE {
+            return Err(anyhow!("This doesn't look like a MINIX filesystem."))
+        }
         let super_block = SuperBlock::new(partition)?;
         Ok(MinixPartition {
             partition,
@@ -334,6 +348,7 @@ impl PartitionTree {
             size_bytes: file.metadata()?.len(),
             file: Rc::new(file),
             start_bytes: 0,
+            partition_table: 0,
         };
         Self::get_partitions(possible_partition)
     }
@@ -360,9 +375,10 @@ impl PartitionTree {
 
         let mut partition_table = Box::new([None, None, None, None]);
         for i in 0..partition_table.len() {
+            let partition_table_offset = PARTITION_TABLE_OFFSET + (PartitionTableEntry::size() * i) as u64;
             let partition_table_entry = PartitionTableEntry::from_partition_offset(
                 &possible_partition,
-                PARTITION_TABLE_OFFSET + (PartitionTableEntry::size() * i) as u64,
+                partition_table_offset
             )?;
 
             // it is zero if it is an empty partition
@@ -372,6 +388,7 @@ impl PartitionTree {
                     file: possible_partition.file.clone(),
                     start_bytes: partition_table_entry.l_first as u64 * SECTOR_SIZE,
                     size_bytes: partition_table_entry.size as u64 * SECTOR_SIZE,
+                    partition_table: partition_table_offset
                 })?);
             }
         }
@@ -779,6 +796,17 @@ mod tests {
         assert_eq!(CString::new(msg_alt.get().expect("could not read msg"))?.to_str()?, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
         assert_eq!(CString::new(msg_complex.get().expect("could not read msg"))?.to_str()?, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_invalid_minix_fs() -> Result<()> {
+
+        /// TODO the '0, 0' partition is not valid but the '0, 2' one is
+        let partition_tree = PartitionTree::new("./Images/HardDisk").unwrap();
+        let PartitionTree::SubPartitions(subs) = partition_tree else {
+            panic!("Did not get sub partitions back")
+        };
         Ok(())
     }
 }
