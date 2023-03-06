@@ -43,6 +43,7 @@ fn main() {
 
     let partition_tree = PartitionTree::new(&args.imagefile).expect("");
 
+    //TODO these shouldn't be panics
     let result = match (args.part, args.subpart) {
         (Some(part), Some(subpart)) => {
             let PartitionTree::SubPartitions(primary_table) = partition_tree else {
