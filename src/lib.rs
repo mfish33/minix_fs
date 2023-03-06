@@ -38,19 +38,9 @@ macro_rules! From_Bytes {
             }
 
             pub fn from_bytes(bytes: Vec<u8>) -> Vec<$struct_name> {
-                bytes
-                    .chunks_exact($struct_name::size())
-                    .map(|chunk| {
-                        let mut sized_buffer = $struct_name::get_sized_buffer();
-                        sized_buffer.as_mut().copy_from_slice(chunk);
-                        unsafe {
-                            std::mem::transmute::<
-                                [u8; std::mem::size_of::<$struct_name>()],
-                                $struct_name,
-                            >(sized_buffer)
-                        }
-                    })
-                    .collect()
+                let amnt = bytes.len() / std::mem::size_of::<$struct_name>();
+                let struct_slice = unsafe { std::mem::transmute::<&[u8], &[$struct_name]> (&bytes) };
+                let new = Vec::from(&struct_slice[0..amnt]);
             }
 
             fn get_sized_buffer() -> [u8; std::mem::size_of::<$struct_name>()] {
