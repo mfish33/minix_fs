@@ -756,6 +756,7 @@ mod tests {
         let pnico_dir = root_dir.get_at_path("home/pnico").expect("pnico not found");
         let message_file = root_dir.get_at_path("home/pnico/Message").expect("message not found");
         let message_file_alt = root_dir.get_at_path("/home/pnico/Message").expect("message alt not found");
+        let message_complex = root_dir.get_at_path("/home/pnico/./../pnico/../../home/pnico/./Message").expect("message not found along complex path");
         let FileSystemRef::DirectoryRef(bin) = bin_dir else {
             panic!("bin not dir");
         };
@@ -768,11 +769,15 @@ mod tests {
         let FileSystemRef::FileRef(msg_alt) = message_file_alt else {
             panic!("msg alt not file");
         };
+        let FileSystemRef::FileRef(msg_complex) = message_complex else {
+            panic!("msg alt not file");
+        };
 
         assert!(bin.name == "bin");
         assert!(pnico.name == "pnico");
         assert_eq!(CString::new(msg.get().expect("could not read msg"))?.to_str()?, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
         assert_eq!(CString::new(msg_alt.get().expect("could not read msg"))?.to_str()?, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
+        assert_eq!(CString::new(msg_complex.get().expect("could not read msg"))?.to_str()?, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
 
         Ok(())
     }
