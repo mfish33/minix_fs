@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use enum_dispatch::enum_dispatch;
-use std::{fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc, any::Any};
+use std::{fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc, any::Any, fmt::Display};
 
 const SECTOR_SIZE: u64 = 512;
 const SUPER_BLOCK_OFFSET: u64 = 1024;
@@ -111,6 +111,39 @@ struct Inode {
     unused: u32,
 }
 From_Bytes!(Inode);
+
+struct Permissions {
+    mode: u16
+}
+
+impl From<u16> for Permissions {
+    fn from(other: u16) -> Self {
+        Permissions {mode: other}
+    }
+}
+
+impl Display for Permissions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut perm = String::with_capacity(9);
+        let letters = ['r', 'w', 'x'];
+
+        if self.mode & 0o40000 != 0 {
+            perm.push('d');
+        }
+        else {
+            perm.push('-');
+        }
+        for i in 0..9 {
+            if self.mode & (1 << (8 - i)) != 0 {
+                perm.push(letters[i % letters.len()]);
+            } else {
+                perm.push('-');
+            }
+        }
+        write!(f, "{}", perm)
+    }
+}
+
 
 impl Inode {
     pub fn zone_iter<'b, 'a: 'b>(
@@ -414,6 +447,7 @@ From_Bytes!(SuperBlock);
 #[enum_dispatch]
 trait FileSystemRefFunctionality {
     fn name(&self) -> &String;
+    fn inode(&self) -> &Inode;
 }
 
 #[enum_dispatch(FileSystemRefFunctionality)]
@@ -459,6 +493,14 @@ impl<'a, 'b: 'a> FileSystemRef<'b> {
     }
 }
 
+impl Display for FileSystemRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let permisions: Permissions = self.inode().mode.into();
+        let size = self.inode().size;
+        write!(f, "{}{:>10} {}", permisions, size, self.name())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DirectoryRef<'a> {
     partition: &'a MinixPartition<'a>,
@@ -475,6 +517,10 @@ impl<'a> DirectoryRef<'a> {
 impl<'a> FileSystemRefFunctionality for DirectoryRef<'a> {
     fn name(&self) -> &String {
         &self.name
+    }
+
+    fn inode(&self) ->  &Inode {
+        &self.inode
     }
 }
 
@@ -509,6 +555,10 @@ impl<'a> FileRef<'a> {
 impl<'a> FileSystemRefFunctionality for FileRef<'a> {
     fn name(&self) -> &String {
         &self.name
+    }
+
+    fn inode(&self) ->  &Inode {
+        &self.inode
     }
 }
 
@@ -774,6 +824,7 @@ mod tests {
         let message_file = root_dir.get_at_path("home/pnico/Message").expect("message not found");
         let message_file_alt = root_dir.get_at_path("/home/pnico/Message").expect("message alt not found");
         let message_complex = root_dir.get_at_path("/home/pnico/./../pnico/../../home/pnico/./Message").expect("message not found along complex path");
+
         let FileSystemRef::DirectoryRef(bin) = bin_dir else {
             panic!("bin not dir");
         };
@@ -789,6 +840,7 @@ mod tests {
         let FileSystemRef::FileRef(msg_complex) = message_complex else {
             panic!("msg alt not file");
         };
+
 
         assert!(bin.name == "bin");
         assert!(pnico.name == "pnico");
