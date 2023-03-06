@@ -40,7 +40,7 @@ macro_rules! From_Bytes {
             pub fn from_bytes(bytes: Vec<u8>) -> Vec<$struct_name> {
                 let amnt = bytes.len() / std::mem::size_of::<$struct_name>();
                 let struct_slice = unsafe { std::mem::transmute::<&[u8], &[$struct_name]> (&bytes) };
-                let new = Vec::from(&struct_slice[0..amnt]);
+                Vec::from(&struct_slice[0..amnt])
             }
 
             fn get_sized_buffer() -> [u8; std::mem::size_of::<$struct_name>()] {
@@ -555,7 +555,7 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
         self.file_iter().find(|file_ref| file_ref.name == name)
     }
 
-    pub fn get_path(self: &'a Directory<'a, 'b>, mut path: &str) -> Result<FileSystemRef<'b>> {
+    pub fn get_at_path(self: &'a Directory<'a, 'b>, mut path: &str) -> Result<FileSystemRef<'b>> {
         // treat paths which lead with '/' the same as those which don't,
         // relative to some directory, "/usr/bin/gcc" == "usr/bin/gcc" should return the same file, if it exists
         if let Some(leading) = path.chars().next() {
@@ -567,7 +567,7 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
             Some((stem, path)) => {
                 if let Some(FileSystemRef::DirectoryRef(dref)) = self.iter().find(|file_system_ref| file_system_ref.name() == stem) {
                     let sub_dir: Directory<'a, 'b> = Directory::new(dref)?;
-                    sub_dir.get_path(path)
+                    sub_dir.get_at_path(path)
                 } else {
                     Err(anyhow::Error::msg("invalid path"))
                 }
@@ -597,7 +597,6 @@ mod tests {
 
     use super::*;
     use std::ffi::CString;
-
 
     // #[test]
     // fn test_get_super_block() -> Result<()> {
@@ -753,10 +752,10 @@ mod tests {
         let root_ref = minix_fs.root_ref()?;
         let root_dir = root_ref.get()?;
 
-        let bin_dir = root_dir.get_path("bin").expect("bin not found");
-        let pnico_dir = root_dir.get_path("home/pnico").expect("pnico not found");
-        let message_file = root_dir.get_path("home/pnico/Message").expect("message not found");
-        let message_file_alt = root_dir.get_path("/home/pnico/Message").expect("message alt not found");
+        let bin_dir = root_dir.get_at_path("bin").expect("bin not found");
+        let pnico_dir = root_dir.get_at_path("home/pnico").expect("pnico not found");
+        let message_file = root_dir.get_at_path("home/pnico/Message").expect("message not found");
+        let message_file_alt = root_dir.get_at_path("/home/pnico/Message").expect("message alt not found");
         let FileSystemRef::DirectoryRef(bin) = bin_dir else {
             panic!("bin not dir");
         };
