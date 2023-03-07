@@ -51,7 +51,6 @@ macro_rules! From_Bytes {
     };
 }
 
-
 // ===================== Partitions =====================
 
 #[derive(Debug, Clone)]
@@ -94,7 +93,6 @@ impl TryFrom<&PartitionTree> for Partition {
     }
 }
 
-
 #[repr(C)]
 #[repr(packed)]
 #[derive(Debug, Clone, Copy)]
@@ -113,13 +111,11 @@ struct PartitionTableEntry {
 
 From_Bytes!(PartitionTableEntry);
 
-
 #[derive(Debug, Clone)]
 pub enum PartitionTree {
     Partition(Partition),
     SubPartitions(Box<[Option<PartitionTree>; 4]>),
 }
-
 
 impl PartitionTree {
     const PARTITION_TABLE_OFFSET: u64 = 0x1be;
@@ -183,7 +179,6 @@ impl PartitionTree {
 }
 
 // ===================== Minix Primitives =====================
-
 
 #[derive(Debug, Clone)]
 pub struct MinixPartition<'a> {
@@ -420,7 +415,6 @@ impl IndirectIterator {
     }
 }
 
-
 #[repr(C)]
 #[repr(packed)]
 #[derive(Debug, Clone, Copy)]
@@ -496,8 +490,8 @@ pub struct DirectoryRef<'a> {
     pub name: String,
 }
 
-impl<'a> DirectoryRef<'a> {
-    pub fn get(&self) -> Result<Directory> {
+impl<'a, 'b: 'a> DirectoryRef<'b> {
+    pub fn get(&'a self) -> Result<Directory<'a, 'b>> {
         Directory::new(self)
     }
 }
@@ -582,11 +576,11 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
         Ok(Self { dir_ref, refs })
     }
 
-    pub fn iter(&'a self) -> impl Iterator<Item = &'a FileSystemRef<'b>> + '_ {
+    pub fn iter(&'a self) -> impl Iterator<Item = &'a FileSystemRef<'b>> {
         self.refs.iter()
     }
 
-    pub fn dir_iter(&'a self) -> impl Iterator<Item = &DirectoryRef> + '_ {
+    pub fn dir_iter(&'a self) -> impl Iterator<Item = &DirectoryRef> {
         self.refs
             .iter()
             .filter_map(|file_system_ref| match file_system_ref {
@@ -595,7 +589,7 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
             })
     }
 
-    pub fn file_iter(&'a self) -> impl Iterator<Item = &FileRef> + '_ {
+    pub fn file_iter(&'a self) -> impl Iterator<Item = &FileRef> {
         self.refs
             .iter()
             .filter_map(|file_system_ref| match file_system_ref {
@@ -638,8 +632,7 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
 
         match (self.find(path[0]), &path[1..]) {
             (Some(FileSystemRef::DirectoryRef(dir_ref)), rst_path) => {
-                let sub_dir = Directory::new(dir_ref)?;
-                sub_dir.get_at_path_internal(rst_path)
+                dir_ref.get()?.get_at_path_internal(rst_path)
             }
             // Files should not have any path left after them
             (Some(FileSystemRef::FileRef(file_ref)), []) => {
@@ -688,8 +681,6 @@ impl Display for Permissions {
         write!(f, "{}", perm)
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
