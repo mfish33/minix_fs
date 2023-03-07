@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use enum_dispatch::enum_dispatch;
-use std::{fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc};
+use std::{fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc, fmt::Display};
 
 const SECTOR_SIZE: u64 = 512;
 const SUPER_BLOCK_OFFSET: u64 = 1024;
@@ -10,8 +10,8 @@ const MINIX_PARTITION_TYPE: u8 = 0x81;
 
 macro_rules! From_Bytes {
     ($struct_name: ident) => {
+        #[allow(dead_code)]
         impl $struct_name {
-            #[allow(dead_code)]
             pub fn from_partition_offset(
                 partition: &Partition,
                 offset: u64,
@@ -38,19 +38,16 @@ macro_rules! From_Bytes {
                 }
             }
 
-            #[allow(dead_code)]
             pub fn from_bytes(bytes: Vec<u8>) -> Vec<$struct_name> {
                 let amnt = bytes.len() / std::mem::size_of::<$struct_name>();
                 let struct_slice = unsafe { std::mem::transmute::<&[u8], &[$struct_name]> (&bytes) };
                 Vec::from(&struct_slice[0..amnt])
             }
 
-            #[allow(dead_code)]
             fn get_sized_buffer() -> [u8; std::mem::size_of::<$struct_name>()] {
                 [0; std::mem::size_of::<$struct_name>()]
             }
 
-            #[allow(dead_code)]
             fn size() -> usize {
                 std::mem::size_of::<$struct_name>()
             }
@@ -73,6 +70,7 @@ struct PartitionTableEntry {
     l_first: u32,
     size: u32,
 }
+
 From_Bytes!(PartitionTableEntry);
 
 #[repr(C)]
@@ -114,6 +112,39 @@ struct Inode {
     unused: u32,
 }
 From_Bytes!(Inode);
+
+struct Permissions {
+    mode: u16
+}
+
+impl From<u16> for Permissions {
+    fn from(other: u16) -> Self {
+        Permissions {mode: other}
+    }
+}
+
+impl Display for Permissions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut perm = String::with_capacity(9);
+        let letters = ['r', 'w', 'x'];
+
+        if self.mode & 0o40000 != 0 {
+            perm.push('d');
+        }
+        else {
+            perm.push('-');
+        }
+        for i in 0..9 {
+            if self.mode & (1 << (8 - i)) != 0 {
+                perm.push(letters[i % letters.len()]);
+            } else {
+                perm.push('-');
+            }
+        }
+        write!(f, "{}", perm)
+    }
+}
+
 
 impl Inode {
     pub fn zone_iter<'b, 'a: 'b>(
@@ -242,6 +273,7 @@ pub struct Partition {
     file: Rc<fs::File>,
     start_bytes: u64,
     size_bytes: u64,
+    partition_table_abs_offset: u64,
 }
 
 impl Partition {
@@ -251,6 +283,15 @@ impl Partition {
         }
         let bytes = self.file.read_at(buf, offset + self.start_bytes)?;
         Ok(bytes)
+    }
+
+    fn get_partition_table(&self) -> Result<PartitionTableEntry> {
+        let mut buf = PartitionTableEntry::get_sized_buffer();
+        let bytes = self.file.read_at(&mut buf, self.partition_table_abs_offset)?;
+        if bytes != std::mem::size_of::<PartitionTableEntry>() {
+            return Err(anyhow!("Failed to read partition table entry"));
+        }
+        Ok(unsafe {std::mem::transmute(buf)})
     }
 }
 
@@ -263,6 +304,10 @@ pub struct MinixPartition<'a> {
 impl<'a> MinixPartition<'a> {
     pub fn new(partition: &'a Partition) -> Result<Self> {
         // TODO: Somehow check the partition table entry for the partition type??
+        let partition_table = partition.get_partition_table()?;
+        if partition_table.part_type != MINIX_PARTITION_TYPE {
+            return Err(anyhow!("This doesn't look like a MINIX filesystem. {}", partition_table.part_type))
+        }
         let super_block = SuperBlock::new(partition)?;
         Ok(MinixPartition {
             partition,
@@ -338,6 +383,7 @@ impl PartitionTree {
             size_bytes: file.metadata()?.len(),
             file: Rc::new(file),
             start_bytes: 0,
+            partition_table_abs_offset: 0,
         };
         Self::get_partitions(possible_partition)
     }
@@ -364,9 +410,10 @@ impl PartitionTree {
 
         let mut partition_table = Box::new([None, None, None, None]);
         for i in 0..partition_table.len() {
+            let relative_partition_table_offset = PARTITION_TABLE_OFFSET + (PartitionTableEntry::size() * i) as u64;
             let partition_table_entry = PartitionTableEntry::from_partition_offset(
                 &possible_partition,
-                PARTITION_TABLE_OFFSET + (PartitionTableEntry::size() * i) as u64,
+                relative_partition_table_offset
             )?;
 
             // it is zero if it is an empty partition
@@ -376,6 +423,7 @@ impl PartitionTree {
                     file: possible_partition.file.clone(),
                     start_bytes: partition_table_entry.l_first as u64 * SECTOR_SIZE,
                     size_bytes: partition_table_entry.size as u64 * SECTOR_SIZE,
+                    partition_table_abs_offset: possible_partition.start_bytes + relative_partition_table_offset
                 })?);
             }
         }
@@ -400,6 +448,7 @@ From_Bytes!(SuperBlock);
 #[enum_dispatch]
 trait FileSystemRefFunctionality {
     fn name(&self) -> &String;
+    fn inode(&self) -> &Inode;
 }
 
 #[enum_dispatch(FileSystemRefFunctionality)]
@@ -445,6 +494,14 @@ impl<'a, 'b: 'a> FileSystemRef<'b> {
     }
 }
 
+impl Display for FileSystemRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let permisions: Permissions = self.inode().mode.into();
+        let size = self.inode().size;
+        write!(f, "{}{:>10} {}", permisions, size, self.name())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DirectoryRef<'a> {
     partition: &'a MinixPartition<'a>,
@@ -461,6 +518,10 @@ impl<'a> DirectoryRef<'a> {
 impl<'a> FileSystemRefFunctionality for DirectoryRef<'a> {
     fn name(&self) -> &String {
         &self.name
+    }
+
+    fn inode(&self) ->  &Inode {
+        &self.inode
     }
 }
 
@@ -495,6 +556,10 @@ impl<'a> FileRef<'a> {
 impl<'a> FileSystemRefFunctionality for FileRef<'a> {
     fn name(&self) -> &String {
         &self.name
+    }
+
+    fn inode(&self) ->  &Inode {
+        &self.inode
     }
 }
 
@@ -768,6 +833,7 @@ mod tests {
         let message_file = root_dir.get_at_path("home/pnico/Message").expect("message not found");
         let message_file_alt = root_dir.get_at_path("/home/pnico/Message").expect("message alt not found");
         let message_complex = root_dir.get_at_path("/home/pnico/./../pnico/../../home/pnico/./Message").expect("message not found along complex path");
+
         let FileSystemRef::DirectoryRef(bin) = bin_dir else {
             panic!("bin not dir");
         };
@@ -784,6 +850,7 @@ mod tests {
             panic!("msg alt not file");
         };
 
+
         assert!(bin.name == "bin");
         assert!(pnico.name == "pnico");
         assert_eq!(CString::new(msg.get().expect("could not read msg"))?.to_str()?, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
@@ -792,4 +859,5 @@ mod tests {
 
         Ok(())
     }
+
 }
