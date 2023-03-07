@@ -11,6 +11,7 @@ const MINIX_PARTITION_TYPE: u8 = 0x81;
 macro_rules! From_Bytes {
     ($struct_name: ident) => {
         impl $struct_name {
+            #[allow(dead_code)]
             pub fn from_partition_offset(
                 partition: &Partition,
                 offset: u64,
@@ -37,16 +38,19 @@ macro_rules! From_Bytes {
                 }
             }
 
+            #[allow(dead_code)]
             pub fn from_bytes(bytes: Vec<u8>) -> Vec<$struct_name> {
                 let amnt = bytes.len() / std::mem::size_of::<$struct_name>();
                 let struct_slice = unsafe { std::mem::transmute::<&[u8], &[$struct_name]> (&bytes) };
                 Vec::from(&struct_slice[0..amnt])
             }
 
+            #[allow(dead_code)]
             fn get_sized_buffer() -> [u8; std::mem::size_of::<$struct_name>()] {
                 [0; std::mem::size_of::<$struct_name>()]
             }
 
+            #[allow(dead_code)]
             fn size() -> usize {
                 std::mem::size_of::<$struct_name>()
             }
@@ -529,7 +533,7 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
         self.refs.iter()
     }
 
-    pub fn dir_iter(&self) -> impl Iterator<Item = &DirectoryRef> + '_ {
+    pub fn dir_iter(&'a self) -> impl Iterator<Item = &DirectoryRef> + '_ {
         self.refs
             .iter()
             .filter_map(|file_system_ref| match file_system_ref {
@@ -538,7 +542,7 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
             })
     }
 
-    pub fn file_iter(&self) -> impl Iterator<Item = &FileRef> + '_ {
+    pub fn file_iter(&'a self) -> impl Iterator<Item = &FileRef> + '_ {
         self.refs
             .iter()
             .filter_map(|file_system_ref| match file_system_ref {
@@ -547,38 +551,45 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
             })
     }
 
-    pub fn find_dir(&self, name: &str) -> Option<&DirectoryRef> {
+    pub fn find_dir(&'a self, name: &str) -> Option<&DirectoryRef> {
         self.dir_iter().find(|dir_ref| dir_ref.name == name)
     }
 
-    pub fn find_file(&self, name: &str) -> Option<&FileRef> {
+    pub fn find_file(&'a self, name: &str) -> Option<&FileRef> {
         self.file_iter().find(|file_ref| file_ref.name == name)
+    }
+
+    pub fn find(&'a self, name: &str) -> Option<&'a FileSystemRef<'b>> {
+        self.iter().find(|file_ref| file_ref.name() == name)
     }
 
     pub fn get_at_path(self: &'a Directory<'a, 'b>, mut path: &str) -> Result<FileSystemRef<'b>> {
         // treat paths which lead with '/' the same as those which don't,
         // relative to some directory, "/usr/bin/gcc" == "usr/bin/gcc" should return the same file, if it exists
-        if let Some(leading) = path.chars().next() {
-            if leading == '\\' || leading == '/' {
-                path = &path[1..];
-            }
+        if let Some('/') = path.chars().next() {
+            path = &path[1..];
         }
-        match path.split_once(&['\\', '/']) {
-            Some((stem, path)) => {
-                if let Some(FileSystemRef::DirectoryRef(dref)) = self.iter().find(|file_system_ref| file_system_ref.name() == stem) {
-                    let sub_dir: Directory<'a, 'b> = Directory::new(dref)?;
-                    sub_dir.get_at_path(path)
-                } else {
-                    Err(anyhow::Error::msg("invalid path"))
-                }
-            }
-            None => {
-                if let Some(fsref) = self.iter().find(|file_system_ref| file_system_ref.name() == path) {
-                    Ok(fsref.clone())
-                } else {
-                    Err(anyhow::Error::msg("invalid path"))
-                }
-            }
+
+        let path_elements:Vec<_> = path.split('/').collect();
+        self.get_at_path_internal(&path_elements)
+    }
+
+    fn get_at_path_internal(self: &'a Directory<'a, 'b>, path: &[&str]) -> Result<FileSystemRef<'b>> {
+        if path.is_empty() {
+            // if path is empty then the current directory is returned
+            return Ok(FileSystemRef::DirectoryRef(self.deref().clone()))
+        };
+
+        match (self.find(path[0]), &path[1..]) {
+            (Some(FileSystemRef::DirectoryRef(dir_ref)), rst_path) => {
+                let sub_dir = Directory::new(dir_ref)?;
+                sub_dir.get_at_path_internal(rst_path)
+            },
+            // Files should not have any path left after them
+            (Some(FileSystemRef::FileRef(file_ref)), []) => {
+               Ok(FileSystemRef::FileRef(file_ref.clone()))
+            },
+            _ => Err(anyhow!("invalid path"))
         }
     }
 }
