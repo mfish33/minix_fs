@@ -1,8 +1,8 @@
-use std::{os::fd::AsFd, io::{Write, Seek}, os::unix::prelude::FileExt};
+use std::{io::Write, os::fd::AsFd};
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use minix_fs::{Partition, PartitionTree, MinixPartition, FileSystemRef};
+use minix_fs::{FileSystemRef, MinixPartition, Partition, PartitionTree};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -23,14 +23,13 @@ struct Args {
     srcpath: String,
 
     dstpath: Option<String>,
-
 }
 
 fn minget(partition: &Partition, args: Args, mut dest: std::fs::File) -> Result<()> {
     let minixfs = MinixPartition::new(partition)?;
     let root_ref = minixfs.root_ref()?;
     let root = root_ref.get()?;
-    let file_system_ref =  root.get_at_path(args.srcpath.as_str())?;
+    let file_system_ref = root.get_at_path(args.srcpath.as_str())?;
 
     let FileSystemRef::FileRef(file_ref) = file_system_ref else {
         return Err(anyhow!("'srcpath' must refer to a file"))
@@ -45,15 +44,14 @@ fn minget(partition: &Partition, args: Args, mut dest: std::fs::File) -> Result<
             }
             Ok(())
         }
-        Err(io_err) => Err(anyhow!(io_err))
+        Err(io_err) => Err(anyhow!(io_err)),
     }
 }
 
 fn minget_main(args: Args) -> Result<()> {
-    let mut dest = if let Some(dstpath) = args.dstpath.clone() {
+    let dest = if let Some(dstpath) = args.dstpath.clone() {
         std::fs::File::create(dstpath)?
-    }
-    else {
+    } else {
         std::io::stdout().as_fd().try_clone_to_owned()?.into()
     };
     let partition_tree = PartitionTree::new(&args.imagefile)?;
@@ -70,7 +68,6 @@ fn minget_main(args: Args) -> Result<()> {
                 return Err(anyhow!("invalid '-s' argument or invalid secondary partition table"))
             };
             minget(partition, args, dest)
-
         }
         (Some(part), None) => {
             let PartitionTree::SubPartitions(primary_table) = partition_tree else {
@@ -92,7 +89,7 @@ fn minget_main(args: Args) -> Result<()> {
 
 fn main() {
     let args = Args::parse();
-    if let Err(error) = minget_main(args){
+    if let Err(error) = minget_main(args) {
         // TODO print to stderr
         println!("{}", error);
     }

@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use minix_fs::{Partition, PartitionTree, MinixPartition, FileSystemRef};
+use minix_fs::{FileSystemRef, MinixPartition, Partition, PartitionTree};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -19,7 +19,6 @@ struct Args {
     imagefile: String,
 
     path: Option<String>,
-
 }
 
 fn minls(partition: &Partition, args: Args) -> Result<()> {
@@ -27,11 +26,11 @@ fn minls(partition: &Partition, args: Args) -> Result<()> {
     let root_ref = minixfs.root_ref()?;
     let root = root_ref.get()?;
 
-    let file_system_ref =  root.get_at_path((&args).path.clone().unwrap_or(String::from("/")).as_str())?;
+    let file_system_ref =
+        root.get_at_path((&args).path.clone().unwrap_or(String::from("/")).as_str())?;
     if let FileSystemRef::DirectoryRef(d) = file_system_ref {
         d.get()?.iter().for_each(|fsr| println!("{}", fsr));
-    }
-    else {
+    } else {
         let mut name_only = format!("{}", file_system_ref);
         // this shouldn't panic, if path is None, then the returned file_system_ref should be the root directory
         name_only.replace_range(21.., &args.path.unwrap());
@@ -55,7 +54,6 @@ fn minls_main(args: Args) -> Result<()> {
                 return Err(anyhow!("invalid '-s' argument or invalid secondary partition table"))
             };
             minls(partition, args)
-
         }
         (Some(part), None) => {
             let PartitionTree::SubPartitions(primary_table) = partition_tree else {
@@ -77,7 +75,7 @@ fn minls_main(args: Args) -> Result<()> {
 
 fn main() {
     let args = Args::parse();
-    if let Err(error) = minls_main(args){
+    if let Err(error) = minls_main(args) {
         // TODO print to stderr
         println!("{}", error);
     }
