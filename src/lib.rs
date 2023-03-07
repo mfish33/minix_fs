@@ -51,219 +51,8 @@ macro_rules! From_Bytes {
     };
 }
 
-#[repr(C)]
-#[repr(packed)]
-#[derive(Debug, Clone, Copy)]
-struct PartitionTableEntry {
-    bootind: u8,
-    start_head: u8,
-    start_sec: u8,
-    start_cyl: u8,
-    part_type: u8,
-    end_head: u8,
-    end_sec: u8,
-    end_cyl: u8,
-    l_first: u32,
-    size: u32,
-}
 
-From_Bytes!(PartitionTableEntry);
-
-#[repr(C)]
-#[repr(packed)]
-#[derive(Debug, Clone, Copy)]
-struct SuperBlock {
-    inodes: u32,
-    pad1: u16,
-    i_blocks: i16,      /* # of blocks used by inode bit map */
-    z_blocks: i16,      /* # of blocks used by zone bit map */
-    firstdata: u16,     /* number of first data zone */
-    log_zone_size: i16, /* log2 of blocks per zone */
-    pad2: i16,          /* make things line up again */
-    max_file: u32,      /* maximum file size */
-    zones: u32,         /* number of zones on disk */
-    magic: i16,         /* magic number */
-    pad3: i16,          /* make things line up again */
-    block_size: u16,    /* block size in bytes */
-    subversion: u8,     /* filesystem sub–version */
-}
-
-const DIRECT_ZONE_COUNT: usize = 7;
-
-#[repr(C)]
-#[repr(packed)]
-#[derive(Debug, Clone, Copy)]
-struct Inode {
-    mode: u16,  /* mode */
-    links: u16, /* number or links */
-    uid: u16,
-    gid: u16,
-    size: u32,
-    atime: i32,
-    mtime: i32,
-    ctime: i32,
-    direct_zones: [u32; DIRECT_ZONE_COUNT],
-    indirect: u32,
-    two_indirect: u32,
-    unused: u32,
-}
-From_Bytes!(Inode);
-
-struct Permissions {
-    mode: u16,
-}
-
-impl From<u16> for Permissions {
-    fn from(other: u16) -> Self {
-        Permissions { mode: other }
-    }
-}
-
-impl Display for Permissions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut perm = String::with_capacity(9);
-        let letters = ['r', 'w', 'x'];
-
-        if self.mode & 0o40000 != 0 {
-            perm.push('d');
-        } else {
-            perm.push('-');
-        }
-        for i in 0..9 {
-            if self.mode & (1 << (8 - i)) != 0 {
-                perm.push(letters[i % letters.len()]);
-            } else {
-                perm.push('-');
-            }
-        }
-        write!(f, "{}", perm)
-    }
-}
-
-impl Inode {
-    pub fn zone_iter<'b, 'a: 'b>(
-        &'b self,
-        part: &'a MinixPartition,
-    ) -> impl Iterator<Item = u32> + 'b {
-        let zone_size = part.super_block.zone_size();
-        let file_size = self.size as u64;
-        let take_amount = if file_size % zone_size == 0 {
-            (file_size / zone_size) as usize
-        } else {
-            (file_size / zone_size) as usize + 1
-        };
-        self.zone_iter_inner(part).take(take_amount)
-    }
-
-    fn zone_iter_inner<'b, 'a: 'b>(
-        &'b self,
-        part: &'a MinixPartition,
-    ) -> Box<dyn Iterator<Item = u32> + 'b> {
-        // Compiler will potentially copy from unaligned memory. This solves that issue
-        let direct_zones = self.direct_zones;
-        let direct_zone_vec = direct_zones.to_vec();
-
-        let indirect_zone = self.indirect;
-
-        let iter_ret = IndirectIterator {
-            zone_ptrs: direct_zone_vec,
-            idx: 0,
-        };
-
-        if self.indirect == 0 {
-            return Box::new(iter_ret);
-        }
-
-        let iter_ret = iter_ret.chain(IndirectIterator::new(part, indirect_zone));
-        if self.two_indirect == 0 {
-            return Box::new(iter_ret);
-        }
-
-        Box::new(
-            iter_ret.chain(
-                IndirectIterator::new(part, self.two_indirect)
-                    .filter(|zone| *zone != 0)
-                    .flat_map(|zone| IndirectIterator::new(part, zone)),
-            ),
-        )
-    }
-}
-
-struct IndirectIterator {
-    zone_ptrs: Vec<u32>,
-    idx: usize,
-}
-
-impl Iterator for IndirectIterator {
-    type Item = u32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let ret = self.zone_ptrs.get(self.idx).copied();
-        self.idx += 1;
-        ret
-    }
-}
-
-impl IndirectIterator {
-    fn new(partition: &MinixPartition, zone_id: u32) -> Self {
-        assert_ne!(zone_id, 0, "IndirectIterator expects a valid zone");
-        let block_idx = partition.super_block.zone_to_block(zone_id);
-
-        // MINIX uses blocks instead of zones for indirect
-        let block_data = partition
-            .read_block(block_idx)
-            .expect("indirect iterator could not read zone");
-        let zone_ptrs: Vec<_> = block_data
-            .chunks(4)
-            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect();
-        IndirectIterator { zone_ptrs, idx: 0 }
-    }
-}
-
-#[repr(C)]
-#[repr(packed)]
-#[derive(Debug, Clone, Copy)]
-struct DirectoryEntry {
-    inode_idx: u32,
-    file_name: [u8; 60],
-}
-From_Bytes!(DirectoryEntry);
-
-impl SuperBlock {
-    const SUPER_BLOCK_OFFSET: u64 = 1024;
-    const MINIX_MAGIC_NUMBER: i16 = 0x4D5A;
-
-    fn new(partition_entry: &Partition) -> Result<Self> {
-        let super_block =
-            SuperBlock::from_partition_offset(partition_entry, SuperBlock::SUPER_BLOCK_OFFSET)?;
-        let block_magic = super_block.magic;
-        if block_magic != SuperBlock::MINIX_MAGIC_NUMBER {
-            Err(anyhow!(
-                "Bad magic number. ({:x})\nThis doesn't look like a MINIX filesystem",
-                block_magic
-            ))
-        } else {
-            Ok(super_block)
-        }
-    }
-}
-
-impl SuperBlock {
-    fn zone_size(&self) -> u64 {
-        (self.block_size as u64) << self.log_zone_size
-    }
-
-    fn zone_to_block(&self, zone_id: u32) -> u32 {
-        zone_id * (1 << self.log_zone_size)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum PartitionTree {
-    Partition(Partition),
-    SubPartitions(Box<[Option<PartitionTree>; 4]>),
-}
+// ===================== Partitions =====================
 
 #[derive(Debug, Clone)]
 pub struct Partition {
@@ -293,6 +82,108 @@ impl Partition {
         Ok(unsafe { std::mem::transmute(buf) })
     }
 }
+
+impl TryFrom<&PartitionTree> for Partition {
+    type Error = ();
+
+    fn try_from(partition_tree: &PartitionTree) -> std::result::Result<Self, Self::Error> {
+        match partition_tree {
+            PartitionTree::Partition(part) => Ok(part.clone()),
+            _ => std::result::Result::Err(()),
+        }
+    }
+}
+
+
+#[repr(C)]
+#[repr(packed)]
+#[derive(Debug, Clone, Copy)]
+struct PartitionTableEntry {
+    bootind: u8,
+    start_head: u8,
+    start_sec: u8,
+    start_cyl: u8,
+    part_type: u8,
+    end_head: u8,
+    end_sec: u8,
+    end_cyl: u8,
+    l_first: u32,
+    size: u32,
+}
+
+From_Bytes!(PartitionTableEntry);
+
+
+#[derive(Debug, Clone)]
+pub enum PartitionTree {
+    Partition(Partition),
+    SubPartitions(Box<[Option<PartitionTree>; 4]>),
+}
+
+
+impl PartitionTree {
+    const PARTITION_TABLE_OFFSET: u64 = 0x1be;
+
+    pub fn new(file_path: &str) -> Result<PartitionTree> {
+        let file = fs::File::open(file_path)
+            .with_context(|| format!("Could not open disk located at {}", file_path))?;
+        let possible_partition = Partition {
+            size_bytes: file.metadata()?.len(),
+            file: Rc::new(file),
+            start_bytes: 0,
+            partition_table_abs_offset: 0,
+        };
+        Self::get_partitions(possible_partition)
+    }
+
+    pub fn get_sub_partition(&self, idx: usize) -> Option<&PartitionTree> {
+        match self {
+            PartitionTree::Partition(_) => None,
+            PartitionTree::SubPartitions(subs) => subs[idx].as_ref(),
+        }
+    }
+
+    fn get_partitions(possible_partition: Partition) -> Result<PartitionTree> {
+        let mut buf = [0u8; 2];
+        // TODO: MAKE CLEANER
+        possible_partition
+            .file
+            .read_at(&mut buf, 510 + possible_partition.start_bytes)
+            .ok();
+
+        if !(buf[0] == 0x55 && buf[1] == 0xAA) {
+            // No partition table
+            return Ok(PartitionTree::Partition(possible_partition));
+        }
+
+        let mut partition_table = Box::new([None, None, None, None]);
+        for i in 0..partition_table.len() {
+            let relative_partition_table_offset =
+                PartitionTree::PARTITION_TABLE_OFFSET + (PartitionTableEntry::size() * i) as u64;
+            let partition_table_entry = PartitionTableEntry::from_partition_offset(
+                &possible_partition,
+                relative_partition_table_offset,
+            )?;
+
+            // it is zero if it is an empty partition
+            // TODO: Check this assumption
+            if partition_table_entry.size != 0 {
+                partition_table[i] = Some(PartitionTree::get_partitions(Partition {
+                    file: possible_partition.file.clone(),
+                    start_bytes: partition_table_entry.l_first as u64 * SECTOR_SIZE,
+                    size_bytes: partition_table_entry.size as u64 * SECTOR_SIZE,
+                    partition_table_abs_offset: possible_partition.start_bytes
+                        + relative_partition_table_offset,
+                })?);
+            }
+        }
+
+        Ok(PartitionTree::SubPartitions(partition_table))
+    }
+}
+
+// ===================== Minix Primitives =====================
+
 
 #[derive(Debug, Clone)]
 pub struct MinixPartition<'a> {
@@ -379,85 +270,167 @@ impl<'a> Deref for MinixPartition<'a> {
     }
 }
 
-impl PartitionTree {
-    const PARTITION_TABLE_OFFSET: u64 = 0x1be;
-
-    pub fn new(file_path: &str) -> Result<PartitionTree> {
-        let file = fs::File::open(file_path)
-            .with_context(|| format!("Could not open disk located at {}", file_path))?;
-        let possible_partition = Partition {
-            size_bytes: file.metadata()?.len(),
-            file: Rc::new(file),
-            start_bytes: 0,
-            partition_table_abs_offset: 0,
-        };
-        Self::get_partitions(possible_partition)
-    }
-
-    pub fn get_sub_partition(&self, idx: usize) -> Option<&PartitionTree> {
-        match self {
-            PartitionTree::Partition(_) => None,
-            PartitionTree::SubPartitions(subs) => subs[idx].as_ref(),
-        }
-    }
-
-    fn get_partitions(possible_partition: Partition) -> Result<PartitionTree> {
-        let mut buf = [0u8; 2];
-        // TODO: MAKE CLEANER
-        possible_partition
-            .file
-            .read_at(&mut buf, 510 + possible_partition.start_bytes)
-            .ok();
-
-        if !(buf[0] == 0x55 && buf[1] == 0xAA) {
-            // No partition table
-            return Ok(PartitionTree::Partition(possible_partition));
-        }
-
-        let mut partition_table = Box::new([None, None, None, None]);
-        for i in 0..partition_table.len() {
-            let relative_partition_table_offset =
-                PartitionTree::PARTITION_TABLE_OFFSET + (PartitionTableEntry::size() * i) as u64;
-            let partition_table_entry = PartitionTableEntry::from_partition_offset(
-                &possible_partition,
-                relative_partition_table_offset,
-            )?;
-
-            // it is zero if it is an empty partition
-            // TODO: Check this assumption
-            if partition_table_entry.size != 0 {
-                partition_table[i] = Some(PartitionTree::get_partitions(Partition {
-                    file: possible_partition.file.clone(),
-                    start_bytes: partition_table_entry.l_first as u64 * SECTOR_SIZE,
-                    size_bytes: partition_table_entry.size as u64 * SECTOR_SIZE,
-                    partition_table_abs_offset: possible_partition.start_bytes
-                        + relative_partition_table_offset,
-                })?);
-            }
-        }
-
-        Ok(PartitionTree::SubPartitions(partition_table))
-    }
+#[repr(C)]
+#[repr(packed)]
+#[derive(Debug, Clone, Copy)]
+struct SuperBlock {
+    inodes: u32,
+    pad1: u16,
+    i_blocks: i16,      /* # of blocks used by inode bit map */
+    z_blocks: i16,      /* # of blocks used by zone bit map */
+    firstdata: u16,     /* number of first data zone */
+    log_zone_size: i16, /* log2 of blocks per zone */
+    pad2: i16,          /* make things line up again */
+    max_file: u32,      /* maximum file size */
+    zones: u32,         /* number of zones on disk */
+    magic: i16,         /* magic number */
+    pad3: i16,          /* make things line up again */
+    block_size: u16,    /* block size in bytes */
+    subversion: u8,     /* filesystem sub–version */
 }
-
-impl TryFrom<&PartitionTree> for Partition {
-    type Error = ();
-
-    fn try_from(partition_tree: &PartitionTree) -> std::result::Result<Self, Self::Error> {
-        match partition_tree {
-            PartitionTree::Partition(part) => Ok(part.clone()),
-            _ => std::result::Result::Err(()),
-        }
-    }
-}
-
 From_Bytes!(SuperBlock);
 
-#[enum_dispatch]
-trait FileSystemRefFunctionality {
-    fn name(&self) -> &String;
-    fn inode(&self) -> &Inode;
+impl SuperBlock {
+    const SUPER_BLOCK_OFFSET: u64 = 1024;
+    const MINIX_MAGIC_NUMBER: i16 = 0x4D5A;
+
+    fn new(partition_entry: &Partition) -> Result<Self> {
+        let super_block =
+            SuperBlock::from_partition_offset(partition_entry, SuperBlock::SUPER_BLOCK_OFFSET)?;
+        let block_magic = super_block.magic;
+        if block_magic != SuperBlock::MINIX_MAGIC_NUMBER {
+            Err(anyhow!(
+                "Bad magic number. ({:x})\nThis doesn't look like a MINIX filesystem",
+                block_magic
+            ))
+        } else {
+            Ok(super_block)
+        }
+    }
+
+    fn zone_size(&self) -> u64 {
+        (self.block_size as u64) << self.log_zone_size
+    }
+
+    fn zone_to_block(&self, zone_id: u32) -> u32 {
+        zone_id * (1 << self.log_zone_size)
+    }
 }
+
+const DIRECT_ZONE_COUNT: usize = 7;
+
+#[repr(C)]
+#[repr(packed)]
+#[derive(Debug, Clone, Copy)]
+struct Inode {
+    mode: u16,  /* mode */
+    links: u16, /* number or links */
+    uid: u16,
+    gid: u16,
+    size: u32,
+    atime: i32,
+    mtime: i32,
+    ctime: i32,
+    direct_zones: [u32; DIRECT_ZONE_COUNT],
+    indirect: u32,
+    two_indirect: u32,
+    unused: u32,
+}
+
+From_Bytes!(Inode);
+
+impl Inode {
+    pub fn zone_iter<'b, 'a: 'b>(
+        &'b self,
+        part: &'a MinixPartition,
+    ) -> impl Iterator<Item = u32> + 'b {
+        let zone_size = part.super_block.zone_size();
+        let file_size = self.size as u64;
+        let take_amount = if file_size % zone_size == 0 {
+            (file_size / zone_size) as usize
+        } else {
+            (file_size / zone_size) as usize + 1
+        };
+        self.zone_iter_inner(part).take(take_amount)
+    }
+
+    fn zone_iter_inner<'b, 'a: 'b>(
+        &'b self,
+        part: &'a MinixPartition,
+    ) -> Box<dyn Iterator<Item = u32> + 'b> {
+        // Compiler will potentially copy from unaligned memory. This solves that issue
+        let direct_zones = self.direct_zones;
+        let direct_zone_vec = direct_zones.to_vec();
+
+        let indirect_zone = self.indirect;
+
+        let iter_ret = IndirectIterator {
+            zone_ptrs: direct_zone_vec,
+            idx: 0,
+        };
+
+        if self.indirect == 0 {
+            return Box::new(iter_ret);
+        }
+
+        let iter_ret = iter_ret.chain(IndirectIterator::new(part, indirect_zone));
+        if self.two_indirect == 0 {
+            return Box::new(iter_ret);
+        }
+
+        Box::new(
+            iter_ret.chain(
+                IndirectIterator::new(part, self.two_indirect)
+                    .filter(|zone| *zone != 0)
+                    .flat_map(|zone| IndirectIterator::new(part, zone)),
+            ),
+        )
+    }
+}
+
+struct IndirectIterator {
+    zone_ptrs: Vec<u32>,
+    idx: usize,
+}
+
+impl Iterator for IndirectIterator {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let ret = self.zone_ptrs.get(self.idx).copied();
+        self.idx += 1;
+        ret
+    }
+}
+
+impl IndirectIterator {
+    fn new(partition: &MinixPartition, zone_id: u32) -> Self {
+        assert_ne!(zone_id, 0, "IndirectIterator expects a valid zone");
+        let block_idx = partition.super_block.zone_to_block(zone_id);
+
+        // MINIX uses blocks instead of zones for indirect
+        let block_data = partition
+            .read_block(block_idx)
+            .expect("indirect iterator could not read zone");
+        let zone_ptrs: Vec<_> = block_data
+            .chunks(4)
+            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        IndirectIterator { zone_ptrs, idx: 0 }
+    }
+}
+
+
+#[repr(C)]
+#[repr(packed)]
+#[derive(Debug, Clone, Copy)]
+struct DirectoryEntry {
+    inode_idx: u32,
+    file_name: [u8; 60],
+}
+From_Bytes!(DirectoryEntry);
+
+// ===================== Rust API Abstraction =====================
 
 #[enum_dispatch(FileSystemRefFunctionality)]
 #[derive(Debug, Clone)]
@@ -508,6 +481,12 @@ impl Display for FileSystemRef<'_> {
         let size = self.inode().size;
         write!(f, "{}{:>10} {}", permisions, size, self.name())
     }
+}
+
+#[enum_dispatch]
+trait FileSystemRefFunctionality {
+    fn name(&self) -> &String;
+    fn inode(&self) -> &Inode;
 }
 
 #[derive(Debug, Clone)]
@@ -678,6 +657,39 @@ impl<'a, 'b: 'a> Deref for Directory<'a, 'b> {
         self.dir_ref
     }
 }
+
+struct Permissions {
+    mode: u16,
+}
+
+impl From<u16> for Permissions {
+    fn from(other: u16) -> Self {
+        Permissions { mode: other }
+    }
+}
+
+impl Display for Permissions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut perm = String::with_capacity(9);
+        let letters = ['r', 'w', 'x'];
+
+        if self.mode & 0o40000 != 0 {
+            perm.push('d');
+        } else {
+            perm.push('-');
+        }
+        for i in 0..9 {
+            if self.mode & (1 << (8 - i)) != 0 {
+                perm.push(letters[i % letters.len()]);
+            } else {
+                perm.push('-');
+            }
+        }
+        write!(f, "{}", perm)
+    }
+}
+
+
 
 #[cfg(test)]
 mod tests {
