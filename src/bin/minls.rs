@@ -31,6 +31,7 @@ fn minls(partition: &Partition, args: Args) -> Result<()> {
         d.get()?.iter().for_each(|fsr| println!("{}", fsr));
     }
     else {
+        //TODO hack in the full path name
         println!("{}", file_system_ref);
     }
     Ok(())
@@ -70,7 +71,6 @@ fn minls_main(args: Args) -> Result<()> {
         }
     }
 }
-
 
 fn main() {
     let args = Args::parse();
