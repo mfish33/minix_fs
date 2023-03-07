@@ -611,13 +611,15 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
     }
 
     pub fn get_at_path(self: &'a Directory<'a, 'b>, mut path: &str) -> Result<FileSystemRef<'b>> {
+        if path.len() == 0 {
+            return Err(anyhow!("path must exist"));
+        }
         // treat paths which lead with '/' the same as those which don't,
         // relative to some directory, "/usr/bin/gcc" == "usr/bin/gcc" should return the same file, if it exists
         if let Some('/') = path.chars().next() {
             path = &path[1..];
         }
-
-        let path_elements: Vec<_> = path.split('/').collect();
+        let path_elements: Vec<_> = path.split_terminator('/').collect();
         self.get_at_path_internal(&path_elements)
     }
 

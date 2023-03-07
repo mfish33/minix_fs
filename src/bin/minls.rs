@@ -26,13 +26,15 @@ fn minls(partition: &Partition, args: Args) -> Result<()> {
     let minixfs = MinixPartition::new(partition)?;
     let root_ref = minixfs.root_ref()?;
     let root = root_ref.get()?;
-    let file_system_ref =  root.get_at_path(args.path.unwrap_or(String::from("/")).as_str())?;
+    let file_system_ref =  root.get_at_path((&args).path.clone().unwrap_or(String::from("/")).as_str())?;
     if let FileSystemRef::DirectoryRef(d) = file_system_ref {
         d.get()?.iter().for_each(|fsr| println!("{}", fsr));
     }
     else {
-        //TODO hack in the full path name
-        println!("{}", file_system_ref);
+        let mut name_only = format!("{}", file_system_ref);
+        // this shouldn't panic, if path is None, then the returned file_system_ref should be the root directory
+        name_only.replace_range(21.., &args.path.unwrap());
+        println!("{}", name_only);
     }
     Ok(())
 }
