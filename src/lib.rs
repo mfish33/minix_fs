@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use enum_dispatch::enum_dispatch;
-use std::{fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc, any::Any, fmt::Display};
+use std::{fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc, fmt::Display};
 
 const SECTOR_SIZE: u64 = 512;
 const SUPER_BLOCK_OFFSET: u64 = 1024;
@@ -10,6 +10,7 @@ const MINIX_PARTITION_TYPE: u8 = 0x81;
 
 macro_rules! From_Bytes {
     ($struct_name: ident) => {
+        #[allow(dead_code)]
         impl $struct_name {
             pub fn from_partition_offset(
                 partition: &Partition,

@@ -1,7 +1,6 @@
-use std::fs::File;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use clap::Parser;
-use minix_fs::{Partition, PartitionTree, MinixPartition, Directory, FileSystemRef};
+use minix_fs::{Partition, PartitionTree, MinixPartition, FileSystemRef};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -37,44 +36,46 @@ fn minls(partition: &Partition, args: Args) -> Result<()> {
     Ok(())
 }
 
-
-fn main() {
-    let args = Args::parse();
-
-    let partition_tree = PartitionTree::new(&args.imagefile).expect("");
-
-    //TODO these shouldn't be panics
-    let result = match (args.part, args.subpart) {
+fn minls_main(args: Args) -> Result<()> {
+    let partition_tree = PartitionTree::new(&args.imagefile)?;
+    //TODO verbosity
+    match (args.part, args.subpart) {
         (Some(part), Some(subpart)) => {
             let PartitionTree::SubPartitions(primary_table) = partition_tree else {
-                panic!("expected subpartitions")
+                return Err(anyhow!("expected subpartitions because '-p' was given"))
             };
             let Some(Some(PartitionTree::SubPartitions(sub_table))) = &primary_table.get(part) else {
-                panic!("invalid '-p' argument or invalid primary partition table")
+                return Err(anyhow!("invalid '-p' argument or invalid primary partition table"))
             };
             let Some(Some(PartitionTree::Partition(partition))) = &sub_table.get(subpart) else {
-                panic!("invalid '-s' argument or invalid secondary partition table")
+                return Err(anyhow!("invalid '-s' argument or invalid secondary partition table"))
             };
             minls(partition, args)
 
         }
         (Some(part), None) => {
             let PartitionTree::SubPartitions(primary_table) = partition_tree else {
-                panic!("expected subpartitions")
+                return Err(anyhow!("expected subpartitions because '-p' was given"))
             };
             let Some(Some(PartitionTree::Partition(partition))) = &primary_table.get(part) else {
-                panic!("invalid '-p' argument or invalid primary partition table")
+                return Err(anyhow!("invalid '-p' argument or invalid primary partition table"))
             };
             minls(partition, args)
         }
         _ => {
             let PartitionTree::Partition(partition) = partition_tree else {
-                panic!("invalid '-p' argument or invalid primary partition table")
+                return Err(anyhow!("expected image without partitions"))
             };
             minls(&partition, args)
         }
-    };
-    if let Err(error) = result {
+    }
+}
+
+
+fn main() {
+    let args = Args::parse();
+    if let Err(error) = minls_main(args){
+        // TODO print to stderr
         println!("{}", error);
     }
 }
