@@ -651,13 +651,11 @@ impl<'a, 'b: 'a> Deref for Directory<'a, 'b> {
     }
 }
 
-struct Permissions {
-    mode: u16,
-}
+struct Permissions(u16);
 
 impl From<u16> for Permissions {
     fn from(other: u16) -> Self {
-        Permissions { mode: other }
+        Permissions(other)
     }
 }
 
@@ -666,13 +664,13 @@ impl Display for Permissions {
         let mut perm = String::with_capacity(9);
         let letters = ['r', 'w', 'x'];
 
-        if self.mode & 0o40000 != 0 {
+        if self.0 & 0o40000 != 0 {
             perm.push('d');
         } else {
             perm.push('-');
         }
         for i in 0..9 {
-            if self.mode & (1 << (8 - i)) != 0 {
+            if self.0 & (1 << (8 - i)) != 0 {
                 perm.push(letters[i % letters.len()]);
             } else {
                 perm.push('-');
@@ -688,14 +686,6 @@ mod tests {
 
     use super::*;
     use std::ffi::CString;
-
-    // #[test]
-    // fn test_get_super_block() -> Result<()> {
-    //     let file = fs::File::open("./Images/Files").unwrap();
-    //     let super_block = SuperBlock::new(&file)?;
-    //     println!("{:?}", super_block);
-    //     Ok(())
-    // }
 
     #[test]
     fn test_level_one_indirection() -> Result<()> {
