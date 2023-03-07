@@ -90,7 +90,6 @@ fn minget_main(args: Args) -> Result<()> {
 fn main() {
     let args = Args::parse();
     if let Err(error) = minget_main(args) {
-        // TODO print to stderr
-        println!("{}", error);
+        eprintln!("{}", error);
     }
 }
