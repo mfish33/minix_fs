@@ -14,7 +14,7 @@ struct Args {
 
     /// increase verbosity level
     #[arg(short)]
-    verbosity: Option<bool>,
+    verbosity: Option<Option<bool>>,
 
     imagefile: String,
 
@@ -26,6 +26,7 @@ fn minls(partition: &Partition, args: Args) -> Result<()> {
     let minixfs = MinixPartition::new(partition)?;
     let root_ref = minixfs.root_ref()?;
     let root = root_ref.get()?;
+
     let file_system_ref =  root.get_at_path((&args).path.clone().unwrap_or(String::from("/")).as_str())?;
     if let FileSystemRef::DirectoryRef(d) = file_system_ref {
         d.get()?.iter().for_each(|fsr| println!("{}", fsr));
