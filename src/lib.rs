@@ -1,12 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use enum_dispatch::enum_dispatch;
-use std::{fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc, fmt::Display};
+use std::{fmt::Display, fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc};
 
 const SECTOR_SIZE: u64 = 512;
-const SUPER_BLOCK_OFFSET: u64 = 1024;
-const MINIX_MAGIC_NUMBER: i16 = 0x4D5A;
-const PARTITION_TABLE_OFFSET: u64 = 0x1be;
-const MINIX_PARTITION_TYPE: u8 = 0x81;
 
 macro_rules! From_Bytes {
     ($struct_name: ident) => {
@@ -40,7 +36,7 @@ macro_rules! From_Bytes {
 
             pub fn from_bytes(bytes: Vec<u8>) -> Vec<$struct_name> {
                 let amnt = bytes.len() / std::mem::size_of::<$struct_name>();
-                let struct_slice = unsafe { std::mem::transmute::<&[u8], &[$struct_name]> (&bytes) };
+                let struct_slice = unsafe { std::mem::transmute::<&[u8], &[$struct_name]>(&bytes) };
                 Vec::from(&struct_slice[0..amnt])
             }
 
@@ -114,12 +110,12 @@ struct Inode {
 From_Bytes!(Inode);
 
 struct Permissions {
-    mode: u16
+    mode: u16,
 }
 
 impl From<u16> for Permissions {
     fn from(other: u16) -> Self {
-        Permissions {mode: other}
+        Permissions { mode: other }
     }
 }
 
@@ -130,8 +126,7 @@ impl Display for Permissions {
 
         if self.mode & 0o40000 != 0 {
             perm.push('d');
-        }
-        else {
+        } else {
             perm.push('-');
         }
         for i in 0..9 {
@@ -145,7 +140,6 @@ impl Display for Permissions {
     }
 }
 
-
 impl Inode {
     pub fn zone_iter<'b, 'a: 'b>(
         &'b self,
@@ -158,8 +152,7 @@ impl Inode {
         } else {
             (file_size / zone_size) as usize + 1
         };
-        self.zone_iter_inner(part)
-            .take(take_amount)
+        self.zone_iter_inner(part).take(take_amount)
     }
 
     fn zone_iter_inner<'b, 'a: 'b>(
@@ -238,10 +231,14 @@ struct DirectoryEntry {
 From_Bytes!(DirectoryEntry);
 
 impl SuperBlock {
+    const SUPER_BLOCK_OFFSET: u64 = 1024;
+    const MINIX_MAGIC_NUMBER: i16 = 0x4D5A;
+
     fn new(partition_entry: &Partition) -> Result<Self> {
-        let super_block = SuperBlock::from_partition_offset(partition_entry, SUPER_BLOCK_OFFSET)?;
+        let super_block =
+            SuperBlock::from_partition_offset(partition_entry, SuperBlock::SUPER_BLOCK_OFFSET)?;
         let block_magic = super_block.magic;
-        if block_magic != MINIX_MAGIC_NUMBER {
+        if block_magic != SuperBlock::MINIX_MAGIC_NUMBER {
             Err(anyhow!(
                 "Bad magic number. ({:x})\nThis doesn't look like a MINIX filesystem",
                 block_magic
@@ -287,11 +284,13 @@ impl Partition {
 
     fn get_partition_table(&self) -> Result<PartitionTableEntry> {
         let mut buf = PartitionTableEntry::get_sized_buffer();
-        let bytes = self.file.read_at(&mut buf, self.partition_table_abs_offset)?;
+        let bytes = self
+            .file
+            .read_at(&mut buf, self.partition_table_abs_offset)?;
         if bytes != std::mem::size_of::<PartitionTableEntry>() {
             return Err(anyhow!("Failed to read partition table entry"));
         }
-        Ok(unsafe {std::mem::transmute(buf)})
+        Ok(unsafe { std::mem::transmute(buf) })
     }
 }
 
@@ -302,11 +301,16 @@ pub struct MinixPartition<'a> {
 }
 
 impl<'a> MinixPartition<'a> {
+    const PART_TYPE: u8 = 0x81;
+
     pub fn new(partition: &'a Partition) -> Result<Self> {
         // TODO: Somehow check the partition table entry for the partition type??
         let partition_table = partition.get_partition_table()?;
-        if partition_table.part_type != MINIX_PARTITION_TYPE {
-            return Err(anyhow!("This doesn't look like a MINIX filesystem. {}", partition_table.part_type))
+        if partition_table.part_type != MinixPartition::PART_TYPE {
+            return Err(anyhow!(
+                "This doesn't look like a MINIX filesystem. {}",
+                partition_table.part_type
+            ));
         }
         let super_block = SuperBlock::new(partition)?;
         Ok(MinixPartition {
@@ -376,6 +380,8 @@ impl<'a> Deref for MinixPartition<'a> {
 }
 
 impl PartitionTree {
+    const PARTITION_TABLE_OFFSET: u64 = 0x1be;
+
     pub fn new(file_path: &str) -> Result<PartitionTree> {
         let file = fs::File::open(file_path)
             .with_context(|| format!("Could not open disk located at {}", file_path))?;
@@ -410,10 +416,11 @@ impl PartitionTree {
 
         let mut partition_table = Box::new([None, None, None, None]);
         for i in 0..partition_table.len() {
-            let relative_partition_table_offset = PARTITION_TABLE_OFFSET + (PartitionTableEntry::size() * i) as u64;
+            let relative_partition_table_offset =
+                PartitionTree::PARTITION_TABLE_OFFSET + (PartitionTableEntry::size() * i) as u64;
             let partition_table_entry = PartitionTableEntry::from_partition_offset(
                 &possible_partition,
-                relative_partition_table_offset
+                relative_partition_table_offset,
             )?;
 
             // it is zero if it is an empty partition
@@ -423,7 +430,8 @@ impl PartitionTree {
                     file: possible_partition.file.clone(),
                     start_bytes: partition_table_entry.l_first as u64 * SECTOR_SIZE,
                     size_bytes: partition_table_entry.size as u64 * SECTOR_SIZE,
-                    partition_table_abs_offset: possible_partition.start_bytes + relative_partition_table_offset
+                    partition_table_abs_offset: possible_partition.start_bytes
+                        + relative_partition_table_offset,
                 })?);
             }
         }
@@ -520,7 +528,7 @@ impl<'a> FileSystemRefFunctionality for DirectoryRef<'a> {
         &self.name
     }
 
-    fn inode(&self) ->  &Inode {
+    fn inode(&self) -> &Inode {
         &self.inode
     }
 }
@@ -534,9 +542,9 @@ pub struct FileRef<'a> {
 
 impl<'a> FileRef<'a> {
     pub fn get(&self) -> Result<Vec<u8>> {
-        let mut data = self.inode
-            .zone_iter(self.partition)
-            .fold(Ok(vec![]), |acc:Result<Vec<u8>>, zone_id| {
+        let mut data = self.inode.zone_iter(self.partition).fold(
+            Ok(vec![]),
+            |acc: Result<Vec<u8>>, zone_id| {
                 let mut acc_vec = acc?;
                 if zone_id == 0 {
                     let mut zeroed = vec![0; self.partition.super_block.zone_size() as usize];
@@ -546,7 +554,8 @@ impl<'a> FileRef<'a> {
                     acc_vec.append(&mut zone_data);
                 }
                 Ok(acc_vec)
-            })?;
+            },
+        )?;
         // the size should be eual or smaller
         data.resize(self.inode.size as usize, 0);
         Ok(data)
@@ -558,7 +567,7 @@ impl<'a> FileSystemRefFunctionality for FileRef<'a> {
         &self.name
     }
 
-    fn inode(&self) ->  &Inode {
+    fn inode(&self) -> &Inode {
         &self.inode
     }
 }
@@ -635,26 +644,29 @@ impl<'a, 'b: 'a> Directory<'a, 'b> {
             path = &path[1..];
         }
 
-        let path_elements:Vec<_> = path.split('/').collect();
+        let path_elements: Vec<_> = path.split('/').collect();
         self.get_at_path_internal(&path_elements)
     }
 
-    fn get_at_path_internal(self: &'a Directory<'a, 'b>, path: &[&str]) -> Result<FileSystemRef<'b>> {
+    fn get_at_path_internal(
+        self: &'a Directory<'a, 'b>,
+        path: &[&str],
+    ) -> Result<FileSystemRef<'b>> {
         if path.is_empty() {
             // if path is empty then the current directory is returned
-            return Ok(FileSystemRef::DirectoryRef(self.deref().clone()))
+            return Ok(FileSystemRef::DirectoryRef(self.deref().clone()));
         };
 
         match (self.find(path[0]), &path[1..]) {
             (Some(FileSystemRef::DirectoryRef(dir_ref)), rst_path) => {
                 let sub_dir = Directory::new(dir_ref)?;
                 sub_dir.get_at_path_internal(rst_path)
-            },
+            }
             // Files should not have any path left after them
             (Some(FileSystemRef::FileRef(file_ref)), []) => {
-               Ok(FileSystemRef::FileRef(file_ref.clone()))
-            },
-            _ => Err(anyhow!("invalid path"))
+                Ok(FileSystemRef::FileRef(file_ref.clone()))
+            }
+            _ => Err(anyhow!("invalid path")),
         }
     }
 }
@@ -748,31 +760,11 @@ mod tests {
         let root_ref = minix_fs.root_ref()?;
         let root_dir = root_ref.get()?;
 
-        let root_contents: Vec<_> = root_dir
-            .iter()
-            .map(|fs_ref| fs_ref.name())
-            .collect();
+        let root_contents: Vec<_> = root_dir.iter().map(|fs_ref| fs_ref.name()).collect();
         // TODO find out why . and .. are files
         let root_expected = vec![
-            ".",
-            "..",
-            "adm",
-            "ast",
-            "bin",
-            "etc",
-            "gnu",
-            "include",
-            "lib",
-            "log",
-            "man",
-            "mdec",
-            "preserve",
-            "run",
-            "sbin",
-            "spool",
-            "tmp",
-            "src",
-            "home",
+            ".", "..", "adm", "ast", "bin", "etc", "gnu", "include", "lib", "log", "man", "mdec",
+            "preserve", "run", "sbin", "spool", "tmp", "src", "home",
         ];
 
         assert_eq!(root_expected, root_contents);
@@ -780,10 +772,7 @@ mod tests {
         let home = root_dir.find_dir("home").unwrap().get()?;
         let pnico = home.find_dir("pnico").unwrap().get()?;
 
-        let pnico_contents: Vec<_> = pnico
-            .iter()
-            .map(|fs_ref| fs_ref.name())
-            .collect();
+        let pnico_contents: Vec<_> = pnico.iter().map(|fs_ref| fs_ref.name()).collect();
 
         let pnico_expected = vec![
             ".",
@@ -803,7 +792,10 @@ mod tests {
         let message_c_string = CString::new(message_bytes)?;
         let message_string = message_c_string.to_str()?;
 
-        assert_eq!(message_string, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
+        assert_eq!(
+            message_string,
+            "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n"
+        );
 
         Ok(())
     }
@@ -830,9 +822,15 @@ mod tests {
 
         let bin_dir = root_dir.get_at_path("bin").expect("bin not found");
         let pnico_dir = root_dir.get_at_path("home/pnico").expect("pnico not found");
-        let message_file = root_dir.get_at_path("home/pnico/Message").expect("message not found");
-        let message_file_alt = root_dir.get_at_path("/home/pnico/Message").expect("message alt not found");
-        let message_complex = root_dir.get_at_path("/home/pnico/./../pnico/../../home/pnico/./Message").expect("message not found along complex path");
+        let message_file = root_dir
+            .get_at_path("home/pnico/Message")
+            .expect("message not found");
+        let message_file_alt = root_dir
+            .get_at_path("/home/pnico/Message")
+            .expect("message alt not found");
+        let message_complex = root_dir
+            .get_at_path("/home/pnico/./../pnico/../../home/pnico/./Message")
+            .expect("message not found along complex path");
 
         let FileSystemRef::DirectoryRef(bin) = bin_dir else {
             panic!("bin not dir");
@@ -850,14 +848,21 @@ mod tests {
             panic!("msg alt not file");
         };
 
-
         assert!(bin.name == "bin");
         assert!(pnico.name == "pnico");
-        assert_eq!(CString::new(msg.get().expect("could not read msg"))?.to_str()?, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
-        assert_eq!(CString::new(msg_alt.get().expect("could not read msg"))?.to_str()?, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
-        assert_eq!(CString::new(msg_complex.get().expect("could not read msg"))?.to_str()?, "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n");
+        assert_eq!(
+            CString::new(msg.get().expect("could not read msg"))?.to_str()?,
+            "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n"
+        );
+        assert_eq!(
+            CString::new(msg_alt.get().expect("could not read msg"))?.to_str()?,
+            "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n"
+        );
+        assert_eq!(
+            CString::new(msg_complex.get().expect("could not read msg"))?.to_str()?,
+            "Hello.\n\nIf you can read this, you're getting somewhere.\n\nHappy hacking.\n"
+        );
 
         Ok(())
     }
-
 }
