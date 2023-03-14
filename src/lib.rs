@@ -128,7 +128,7 @@ impl PartitionTree {
             size_bytes: file.metadata()?.len(),
             file: Rc::new(file),
             start_bytes: 0,
-            partition_table_abs_offset: 0,
+            partition_table_abs_offset: PartitionTree::PARTITION_TABLE_OFFSET,
         };
         Self::get_partitions(possible_partition)
     }
@@ -191,14 +191,17 @@ impl<'a> MinixPartition<'a> {
     const PART_TYPE: u8 = 0x81;
 
     pub fn new(partition: &'a Partition) -> Result<Self> {
-        // TODO: Somehow check the partition table entry for the partition type??
-        let partition_table = partition.get_partition_table()?;
-        info!("{:#?}", partition_table);
-        if partition_table.part_type != MinixPartition::PART_TYPE {
-            return Err(anyhow!(
-                "This doesn't look like a MINIX filesystem. {}",
-                partition_table.part_type
-            ));
+        // if the Disk has no partitions its partition table will have an invalid type and
+        // this check should be skipped
+        if partition.start_bytes != 0 {
+            let partition_table = partition.get_partition_table()?;
+            info!("{:#?}", partition_table);
+            if partition_table.part_type != MinixPartition::PART_TYPE {
+                return Err(anyhow!(
+                    "This doesn't look like a MINIX filesystem. Found partition table type: {}",
+                    partition_table.part_type
+                ));
+            }
         }
         let super_block = SuperBlock::new(partition)?;
         info!("{:#?}", super_block);
