@@ -320,7 +320,7 @@ const DIRECT_ZONE_COUNT: usize = 7;
 #[repr(C)]
 #[repr(packed)]
 #[derive(Debug, Clone, Copy)]
-struct Inode {
+pub struct Inode {
     mode: u16,  /* mode */
     links: u16, /* number or links */
     uid: u16,
@@ -480,7 +480,7 @@ impl Display for FileSystemRef<'_> {
 }
 
 #[enum_dispatch]
-trait FileSystemRefFunctionality {
+pub trait FileSystemRefFunctionality {
     fn name(&self) -> &String;
     fn inode(&self) -> &Inode;
 }

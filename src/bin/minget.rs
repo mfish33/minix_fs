@@ -1,7 +1,8 @@
 use std::{io::Write, os::fd::AsFd};
-
 use anyhow::{anyhow, Result};
 use clap::Parser;
+use log::{LevelFilter, info};
+use simplelog::{TermLogger, TerminalMode, ColorChoice, Config};
 use minix_fs::{FileSystemRef, MinixPartition, Partition, PartitionTree};
 
 #[derive(Parser, Debug)]
@@ -34,6 +35,7 @@ fn minget(partition: &Partition, args: Args, mut dest: std::fs::File) -> Result<
     let FileSystemRef::FileRef(file_ref) = file_system_ref else {
         return Err(anyhow!("'srcpath' must refer to a file"))
     };
+    info!("{:#?}", file_ref.inode());
     let file_bytes = file_ref.get()?;
     let result = dest.write(&file_bytes);
 
@@ -55,7 +57,8 @@ fn minget_main(args: Args) -> Result<()> {
         std::io::stdout().as_fd().try_clone_to_owned()?.into()
     };
     let partition_tree = PartitionTree::new(&args.imagefile)?;
-    //TODO verbosity
+    let log_level = if let Some(_) = args.verbosity {LevelFilter::Info} else {LevelFilter::Off};
+    TermLogger::init(log_level, Config::default(), TerminalMode::Mixed, ColorChoice::Auto)?;
     match (args.part, args.subpart) {
         (Some(part), Some(subpart)) => {
             let PartitionTree::SubPartitions(primary_table) = partition_tree else {
