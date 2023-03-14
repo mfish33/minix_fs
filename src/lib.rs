@@ -360,10 +360,6 @@ impl Inode {
         let direct_zones = self.direct_zones;
         let direct_zone_vec = direct_zones.to_vec();
 
-        // let indirect = self.indirect;
-        // let two_indirect = self.two_indirect;
-        // info!("Direct Zones:\n{:#?}\nindirect: {}\n double: {}", direct_zone_vec, indirect, two_indirect);
-
         let iter_ret = IndirectIterator {
             zone_ptrs: direct_zone_vec,
             idx: 0,
