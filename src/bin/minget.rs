@@ -2,7 +2,7 @@ use std::{io::Write, os::fd::AsFd};
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use log::{LevelFilter, info};
-use simplelog::{TermLogger, TerminalMode, ColorChoice, Config};
+use simplelog::{SimpleLogger, Config};
 use minix_fs::{FileSystemRef, FileSystemRefFunctionality, MinixPartition, Partition, PartitionTree};
 
 #[derive(Parser, Debug)]
@@ -58,7 +58,7 @@ fn minget_main(args: Args) -> Result<()> {
     };
     let partition_tree = PartitionTree::new(&args.imagefile)?;
     let log_level = if args.verbosity {LevelFilter::Info} else {LevelFilter::Off};
-    TermLogger::init(log_level, Config::default(), TerminalMode::Mixed, ColorChoice::Auto)?;
+    SimpleLogger::init(log_level, Config::default())?;
     match (args.part, args.subpart) {
         (Some(part), Some(subpart)) => {
             let PartitionTree::SubPartitions(primary_table) = partition_tree else {
