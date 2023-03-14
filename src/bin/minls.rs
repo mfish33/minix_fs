@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use minix_fs::{FileSystemRef, MinixPartition, Partition, PartitionTree};
+use log::LevelFilter;
+use simplelog::{TermLogger, TerminalMode, ColorChoice, Config};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -41,7 +43,8 @@ fn minls(partition: &Partition, args: Args) -> Result<()> {
 
 fn minls_main(args: Args) -> Result<()> {
     let partition_tree = PartitionTree::new(&args.imagefile)?;
-    //TODO verbosity
+    let log_level = if let Some(_) = args.verbosity {LevelFilter::Info} else {LevelFilter::Debug};
+    TermLogger::init(log_level, Config::default(), TerminalMode::Mixed, ColorChoice::Auto)?;
     match (args.part, args.subpart) {
         (Some(part), Some(subpart)) => {
             let PartitionTree::SubPartitions(primary_table) = partition_tree else {

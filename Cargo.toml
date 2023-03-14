@@ -9,3 +9,5 @@ edition = "2021"
 anyhow = "1.0.69"
 clap = { version = "4.1.8", features = ["derive"] }
 enum_dispatch = "0.3.11"
+log = "0.4.17"
+simplelog = "^0.12.0"

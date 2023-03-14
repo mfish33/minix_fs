@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use enum_dispatch::enum_dispatch;
 use std::{fmt::Display, fs, ops::Deref, os::unix::prelude::FileExt, rc::Rc};
+use log::info;
 
 const SECTOR_SIZE: u64 = 512;
 
@@ -192,6 +193,7 @@ impl<'a> MinixPartition<'a> {
     pub fn new(partition: &'a Partition) -> Result<Self> {
         // TODO: Somehow check the partition table entry for the partition type??
         let partition_table = partition.get_partition_table()?;
+        info!("{:#?}", partition_table);
         if partition_table.part_type != MinixPartition::PART_TYPE {
             return Err(anyhow!(
                 "This doesn't look like a MINIX filesystem. {}",
@@ -199,6 +201,7 @@ impl<'a> MinixPartition<'a> {
             ));
         }
         let super_block = SuperBlock::new(partition)?;
+        info!("{:#?}", super_block);
         Ok(MinixPartition {
             partition,
             super_block,
@@ -357,7 +360,9 @@ impl Inode {
         let direct_zones = self.direct_zones;
         let direct_zone_vec = direct_zones.to_vec();
 
-        let indirect_zone = self.indirect;
+        // let indirect = self.indirect;
+        // let two_indirect = self.two_indirect;
+        // info!("Direct Zones:\n{:#?}\nindirect: {}\n double: {}", direct_zone_vec, indirect, two_indirect);
 
         let iter_ret = IndirectIterator {
             zone_ptrs: direct_zone_vec,
@@ -368,7 +373,7 @@ impl Inode {
             return Box::new(iter_ret);
         }
 
-        let iter_ret = iter_ret.chain(IndirectIterator::new(part, indirect_zone));
+        let iter_ret = iter_ret.chain(IndirectIterator::new(part, self.indirect));
         if self.two_indirect == 0 {
             return Box::new(iter_ret);
         }
@@ -449,6 +454,7 @@ impl<'a, 'b: 'a> FileSystemRef<'b> {
             .collect();
         let name = String::from_utf8(name_vec)?;
         let inode = partition.get_inode(dir_entry.inode_idx)?;
+        info!("{:#?}", inode);
 
         let inode_mode = inode.mode;
         match FILE_TYPE_MASK & inode_mode {
