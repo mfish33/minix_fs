@@ -450,7 +450,6 @@ impl<'a, 'b: 'a> FileSystemRef<'b> {
             .collect();
         let name = String::from_utf8(name_vec)?;
         let inode = partition.get_inode(dir_entry.inode_idx)?;
-        info!("{:#?}", inode);
 
         let inode_mode = inode.mode;
         match FILE_TYPE_MASK & inode_mode {

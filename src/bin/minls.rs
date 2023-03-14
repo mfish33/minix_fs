@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use log::LevelFilter;
+use log::{LevelFilter, Level, info, log_enabled};
 use simplelog::{TermLogger, TerminalMode, ColorChoice, Config};
 use minix_fs::{FileSystemRef, FileSystemRefFunctionality, MinixPartition, Partition, PartitionTree};
 
@@ -16,7 +16,7 @@ struct Args {
 
     /// increase verbosity level
     #[arg(short)]
-    verbosity: Option<Option<bool>>,
+    verbosity: bool,
 
     imagefile: String,
 
@@ -31,8 +31,13 @@ fn minls(partition: &Partition, args: Args) -> Result<()> {
     let file_system_ref =
         root.get_at_path((&args).path.clone().unwrap_or(String::from("/")).as_str())?;
     if let FileSystemRef::DirectoryRef(d) = file_system_ref {
-        d.get()?.iter().for_each(|fsr| println!("{}", fsr));
+        let directory = d.get()?;
+        if log_enabled!(Level::Info) {
+            directory.iter().for_each(|fsr| info!("{:#?}", fsr.inode()));
+        }
+        directory.iter().for_each(|fsr| println!("{}", fsr));
     } else {
+        info!("{:#?}", file_system_ref.inode());
         let mut name_only = format!("{}", file_system_ref);
         // this shouldn't panic, if path is None, then the returned file_system_ref should be the root directory
         name_only.replace_range(21.., &args.path.unwrap());
@@ -43,7 +48,7 @@ fn minls(partition: &Partition, args: Args) -> Result<()> {
 
 fn minls_main(args: Args) -> Result<()> {
     let partition_tree = PartitionTree::new(&args.imagefile)?;
-    let log_level = if let Some(_) = args.verbosity {LevelFilter::Info} else {LevelFilter::Off};
+    let log_level = if args.verbosity {LevelFilter::Info} else {LevelFilter::Off};
     TermLogger::init(log_level, Config::default(), TerminalMode::Mixed, ColorChoice::Auto)?;
     match (args.part, args.subpart) {
         (Some(part), Some(subpart)) => {

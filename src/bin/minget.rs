@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use log::{LevelFilter, info};
 use simplelog::{TermLogger, TerminalMode, ColorChoice, Config};
-use minix_fs::{FileSystemRef, MinixPartition, Partition, PartitionTree};
+use minix_fs::{FileSystemRef, FileSystemRefFunctionality, MinixPartition, Partition, PartitionTree};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -17,7 +17,7 @@ struct Args {
 
     /// increase verbosity level
     #[arg(short)]
-    verbosity: Option<Option<bool>>,
+    verbosity: bool,
 
     imagefile: String,
 
@@ -57,7 +57,7 @@ fn minget_main(args: Args) -> Result<()> {
         std::io::stdout().as_fd().try_clone_to_owned()?.into()
     };
     let partition_tree = PartitionTree::new(&args.imagefile)?;
-    let log_level = if let Some(_) = args.verbosity {LevelFilter::Info} else {LevelFilter::Off};
+    let log_level = if args.verbosity {LevelFilter::Info} else {LevelFilter::Off};
     TermLogger::init(log_level, Config::default(), TerminalMode::Mixed, ColorChoice::Auto)?;
     match (args.part, args.subpart) {
         (Some(part), Some(subpart)) => {
