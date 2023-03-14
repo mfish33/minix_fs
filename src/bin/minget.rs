@@ -94,5 +94,6 @@ fn main() {
     let args = Args::parse();
     if let Err(error) = minget_main(args) {
         eprintln!("{}", error);
+        std::process::exit(-1);
     }
 }

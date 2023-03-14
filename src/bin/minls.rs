@@ -35,6 +35,7 @@ fn minls(partition: &Partition, args: Args) -> Result<()> {
         if log_enabled!(Level::Info) {
             directory.iter().for_each(|fsr| info!("{:#?}", fsr.inode()));
         }
+        println!("/:\n");
         directory.iter().for_each(|fsr| println!("{}", fsr));
     } else {
         info!("{:#?}", file_system_ref.inode());
@@ -85,5 +86,6 @@ fn main() {
     let args = Args::parse();
     if let Err(error) = minls_main(args) {
         eprintln!("{}", error);
+        std::process::exit(-1);
     }
 }
